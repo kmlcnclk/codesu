@@ -1,0 +1,72 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <!-- Hexagon background (removed for icon mark, keeping just the mark) -->
+
+  <!-- Central hexagon outline -->
+  <path d="M128 64 L166 85 L166 127 L128 148 L90 127 L90 85 Z"
+        fill="none"
+        stroke="#6e8bff"
+        stroke-width="4"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <!-- Terminal prompt symbol (>_) inside hexagon -->
+  <g transform="translate(128, 106)">
+    <!-- > symbol -->
+    <path d="M -12 -8 L 4 0 L -12 8"
+          fill="none"
+          stroke="#6e8bff"
+          stroke-width="3.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"/>
+    <!-- _ symbol -->
+    <line x1="8" y1="8" x2="16" y2="8"
+          stroke="#6e8bff"
+          stroke-width="3.5"
+          stroke-linecap="round"/>
+  </g>
+
+  <!-- Connected nodes (circles) at hexagon vertices -->
+  <!-- Top node (blue) -->
+  <g transform="translate(128, 48)">
+    <circle cx="0" cy="0" r="12" fill="none" stroke="#6e8bff" stroke-width="2.5"/>
+    <circle cx="0" cy="0" r="6" fill="#6e8bff"/>
+  </g>
+
+  <!-- Top-right node (pink) -->
+  <g transform="translate(174, 74)">
+    <circle cx="0" cy="0" r="12" fill="none" stroke="#f778ba" stroke-width="2.5"/>
+    <circle cx="0" cy="0" r="6" fill="#f778ba"/>
+  </g>
+
+  <!-- Bottom-right node (cyan) -->
+  <g transform="translate(174, 126)">
+    <circle cx="0" cy="0" r="12" fill="none" stroke="#39c5cf" stroke-width="2.5"/>
+    <circle cx="0" cy="0" r="6" fill="#39c5cf"/>
+  </g>
+
+  <!-- Bottom node (purple) -->
+  <g transform="translate(128, 152)">
+    <circle cx="0" cy="0" r="12" fill="none" stroke="#c07af7" stroke-width="2.5"/>
+    <circle cx="0" cy="0" r="6" fill="#c07af7"/>
+  </g>
+
+  <!-- Bottom-left node (purple) -->
+  <g transform="translate(82, 126)">
+    <circle cx="0" cy="0" r="12" fill="none" stroke="#c07af7" stroke-width="2.5"/>
+    <circle cx="0" cy="0" r="6" fill="#c07af7"/>
+  </g>
+
+  <!-- Top-left node (cyan) -->
+  <g transform="translate(82, 74)">
+    <circle cx="0" cy="0" r="12" fill="none" stroke="#39c5cf" stroke-width="2.5"/>
+    <circle cx="0" cy="0" r="6" fill="#39c5cf"/>
+  </g>
+
+  <!-- Connecting lines from hexagon to nodes -->
+  <line x1="128" y1="64" x2="128" y2="48" stroke="#6e8bff" stroke-width="3" stroke-linecap="round"/>
+  <line x1="166" y1="85" x2="174" y2="74" stroke="#6e8bff" stroke-width="3" stroke-linecap="round"/>
+  <line x1="166" y1="127" x2="174" y2="126" stroke="#6e8bff" stroke-width="3" stroke-linecap="round"/>
+  <line x1="128" y1="148" x2="128" y2="152" stroke="#6e8bff" stroke-width="3" stroke-linecap="round"/>
+  <line x1="90" y1="127" x2="82" y2="126" stroke="#6e8bff" stroke-width="3" stroke-linecap="round"/>
+  <line x1="90" y1="85" x2="82" y2="74" stroke="#6e8bff" stroke-width="3" stroke-linecap="round"/>
+</svg>

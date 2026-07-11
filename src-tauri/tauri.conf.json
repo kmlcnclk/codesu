@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Codesu",
+  "mainBinaryName": "Codesu",
+  "version": "0.1.0",
+  "identifier": "com.kmlcnclk.codesu",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Codesu",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 640,
+        "minHeight": 400,
+        "dragDropEnabled": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "DeveloperTool",
+    "copyright": "© 2026 kmlcnclk · MIT Licensed",
+    "shortDescription": "Run and manage many Claude Code agents at once.",
+    "longDescription": "Codesu is a desktop cockpit for running multiple Claude Code agents across your projects — with a kanban board, notes, activity history, and real terminals.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-",
+      "dmg": {
+        "windowSize": { "width": 640, "height": 400 },
+        "appPosition": { "x": 170, "y": 190 },
+        "applicationFolderPosition": { "x": 470, "y": 190 }
+      }
+    }
+  }
+}

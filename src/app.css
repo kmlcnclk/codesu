@@ -1,0 +1,191 @@
+/*
+ * Codesu — global theme
+ * A single source of truth for the dark theme. Every component references these
+ * CSS custom properties (via var(--token)); nothing hardcodes a hex value.
+ * Custom properties cascade globally, so they're available inside every
+ * component's scoped <style> block.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- Surfaces (layered depth, cool navy-black) ---- */
+  --bg: #090b10; /* app base — deepest */
+  --surface-1: #0d1017; /* titlebar, sidebar */
+  --surface-2: #11151e; /* tabbar, secondary panels */
+  --surface-3: #161b26; /* hover / raised */
+  --surface-4: #1d2431; /* active / pressed */
+  --surface-float: #141a27; /* menus, modals, popovers */
+  --term-bg: #0a0c11; /* terminal canvas */
+
+  /* ---- Borders ---- */
+  --border: #1b2230; /* default hairline */
+  --border-strong: #29313f; /* emphasized / interactive edges */
+  --border-muted: #141a24; /* faint internal dividers */
+
+  /* ---- Text ramp ---- */
+  --text: #e9eef6;
+  --text-secondary: #b0bccc;
+  --text-muted: #7c8799;
+  --text-faint: #566072;
+  --text-ghost: #3f4859;
+
+  /* ---- Accent (indigo-violet) ---- */
+  --accent: #6e8bff;
+  --accent-bright: #8aa1ff;
+  --accent-dim: #5872e6;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(110, 139, 255, 0.14);
+  --accent-softer: rgba(110, 139, 255, 0.08);
+  --accent-line: rgba(110, 139, 255, 0.55);
+  --accent-glow: rgba(110, 139, 255, 0.35);
+
+  /* ---- Status ---- */
+  --ok: #3fb950;
+  --ok-glow: rgba(63, 185, 80, 0.5);
+  --warn: #e3b341;
+  --danger: #ff6b6b;
+  --danger-strong: #ff5f57;
+  --danger-bg: rgba(255, 107, 107, 0.12);
+  --danger-line: rgba(255, 107, 107, 0.28);
+  --danger-glow: rgba(255, 95, 87, 0.55);
+
+  /* ---- Radii ---- */
+  --r-xs: 5px;
+  --r-sm: 7px;
+  --r-md: 9px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+
+  /* ---- Shadows ---- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55);
+  --shadow-xl: 0 28px 70px rgba(0, 0, 0, 0.6);
+  --ring: 0 0 0 2px var(--accent-glow);
+
+  /* ---- Motion ---- */
+  --t-fast: 0.13s ease;
+  --t: 0.18s ease;
+
+  /* ---- Type ---- */
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Code",
+    monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Keyboard focus: a soft accent ring, never a default outline. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+button {
+  font-family: inherit;
+  /* Strip WebKit's native button chrome — it imposes its own padding and content
+     centering, which pushes icons off-center inside icon buttons. */
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+/* ---- Custom scrollbars ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-4) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-4);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+  background-clip: padding-box;
+}
+
+/* ---- rendered markdown (Notes preview, Task details) ---- */
+.md {
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.65;
+  word-break: break-word;
+}
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4 {
+  color: var(--text);
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 1.1em 0 0.5em;
+}
+.md h1 { font-size: 1.5em; }
+.md h2 { font-size: 1.28em; }
+.md h3 { font-size: 1.12em; }
+.md h4 { font-size: 1em; }
+.md p { margin: 0.6em 0; }
+.md ul, .md ol { margin: 0.5em 0; padding-left: 1.5em; }
+.md li { margin: 0.2em 0; }
+.md a { color: var(--accent-bright, var(--accent)); text-decoration: underline; }
+.md code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.88em;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1em 0.36em;
+}
+.md pre {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md, 8px);
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0.7em 0;
+}
+.md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.85em;
+  color: var(--text-secondary);
+}
+.md blockquote {
+  margin: 0.7em 0;
+  padding: 0.2em 0 0.2em 0.9em;
+  border-left: 3px solid var(--accent-line, var(--border-strong));
+  color: var(--text-muted);
+}
+.md hr {
+  border: none;
+  border-top: 1px solid var(--border-muted);
+  margin: 1em 0;
+}
+.md strong { color: var(--text); font-weight: 700; }
+.md.compact { font-size: 12px; line-height: 1.5; }
+.md.compact p { margin: 0.35em 0; }
+.md.compact h1, .md.compact h2, .md.compact h3, .md.compact h4 { margin: 0.5em 0 0.3em; font-size: 1.05em; }
