@@ -324,13 +324,28 @@ function stripFirstLine(s: string): string {
 }
 
 /**
- * POSIX single-quote a string so it can be safely typed into the shell as one arg.
- * Newlines are flattened to spaces — the prompt is typed-ahead into the PTY and
- * embedded newlines would trip the shell's line editor.
+ * Quote a string so it can be safely typed into the shell as one argument.
+ *
+ * Uses ANSI-C quoting ($'...') rather than plain single quotes so the command
+ * stays on a SINGLE physical line: the prompt is typed-ahead into the PTY, and a
+ * real embedded newline would trip the shell's line editor (submit early / show
+ * a continuation prompt). Encoding newlines as `\n` keeps the command one line
+ * while the shell still expands them to real newlines for the launched program.
+ *
+ * Leading/trailing whitespace and blank lines are trimmed; internal newlines are
+ * preserved, so a multi-line prompt reaches the agent formatted as the user typed
+ * it (minus the surrounding blank lines). Requires a bash/zsh-compatible login
+ * shell, which is the macOS default ($SHELL, falling back to /bin/bash).
  */
 export function shellQuote(s: string): string {
-  const flat = s.replace(/\s*\n+\s*/g, " ").trim();
-  return `'${flat.replace(/'/g, `'\\''`)}'`;
+  const body = s
+    .trim() // strip leading/trailing whitespace and blank lines
+    .replace(/\\/g, "\\\\") // escape backslashes first
+    .replace(/'/g, "\\'") // escape single quotes for $'...'
+    .replace(/\r/g, "") // drop carriage returns
+    .replace(/\n/g, "\\n") // real newlines -> \n (keeps command single-line)
+    .replace(/\t/g, "\\t");
+  return `$'${body}'`;
 }
 
 /** Fold a task's title + details (+ any attached file paths) into a seed prompt. */
@@ -344,7 +359,7 @@ export function buildTaskPrompt(
   if (files.length) {
     out += `\n\nAttached files:\n${files.map((a) => `- ${a.path}`).join("\n")}`;
   }
-  return out;
+  return out.trim();
 }
 
 class AppState {
@@ -1122,7 +1137,7 @@ class AppState {
     const was = t.status;
     if (patch.title !== undefined) t.title = patch.title.trim() || t.title;
     if (patch.details !== undefined) {
-      t.details = patch.details;
+      t.details = patch.details.trim();
       t.updatedAt = Date.now();
     }
     if (patch.status !== undefined) t.status = patch.status;
