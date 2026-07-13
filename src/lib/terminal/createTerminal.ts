@@ -125,68 +125,128 @@ export async function createTerminal(
     onData,
   });
 
+  // We mirror the current prompt in `buf` so that, on Enter, we can trim leading
+  // and trailing whitespace before it reaches the agent. `claude` enables the
+  // kitty keyboard protocol and modifyOtherKeys, so xterm reports ordinary keys
+  // to onData as ESCAPE SEQUENCES, not plain characters — byte-level tracking is
+  // hopeless. Instead we track from KEY EVENTS (event.key), which give the real
+  // character regardless of terminal encoding. `trackable` drops to false the
+  // moment something we can't model happens (cursor keys, paste, command chords);
+  // then we submit exactly what was typed rather than risk corrupting it.
+  let buf = "";
+  let trackable = true;
+
   const dataDisp = term.onData((data: string) => {
     invoke("write_pty", { id, data }).catch(() => {});
     options.onInput?.(data);
+    if (data.includes("\x1b[200~")) trackable = false; // bracketed paste we didn't track
   });
 
   const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
 
-  // Single custom key handler (xterm keeps only ONE — a second call replaces the
-  // first), covering two concerns:
-  //
-  // 1. Newline vs. submit, matching Claude Code's REPL:
-  //      Enter                    -> submit  (`\r`, xterm default — left alone)
-  //      Shift+Enter              -> newline (`\n`)
-  //      Option/Alt+Enter (macOS) -> newline (`\n`)
-  //    The 48-year-old VT100 limitation means most terminals send an identical
-  //    carriage return (`\r`) for Enter and Shift+Enter, so Claude reads both as
-  //    "submit". Native terminals solve this with the Kitty keyboard protocol
-  //    (Shift+Enter -> `ESC[13;2u`), which xterm.js v6 does not negotiate. We
-  //    instead write a literal line feed (`\n`) — identical to Ctrl+J, the
-  //    universal newline. (Ctrl+J and `\`+Enter already work via xterm defaults.)
-  //
-  // 2. Clipboard shortcuts. xterm renders to canvas/WebGL, so the browser's
-  //    native Cmd/Ctrl+C cannot see xterm's selection — Copy and Select All must
-  //    be wired manually. Chord is Cmd+key on macOS, Ctrl+Shift+key elsewhere
-  //    (plain Ctrl+C/X are reserved for SIGINT / readline). Paste is left to
-  //    xterm's own textarea handler, which already routes it through bracketed
-  //    paste, so intercepting it would only risk double-paste. Cut can't remove
-  //    committed terminal output, so it is a non-destructive best-effort copy.
+  // Returning false makes xterm skip its own key processing, but it does NOT call
+  // event.preventDefault() for us, so the browser's default action would still
+  // fire on xterm's hidden textarea (Enter inserts a newline there, which xterm
+  // then sends as a submitting carriage return, clobbering our sequence). That
+  // leak was the original Shift+Enter bug; handled() suppresses the native default.
+  const handled = (e: KeyboardEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    return false;
+  };
+
+  // Plain Enter submits. First trim leading/trailing whitespace (blank lines AND
+  // spaces) from the prompt: clear claude's buffer with one Backspace per tracked
+  // character (the cursor sits at the end after linear typing, and Backspace
+  // joins lines), retype the trimmed text, then submit with a carriage return —
+  // all in one write so the bytes arrive in order. Verified against the claude
+  // CLI editor (kitty mode on). If the buffer is untrackable or needs no trim,
+  // submit as-is so we never corrupt what the user typed.
+  const submit = () => {
+    const trimmed = buf.trim();
+    // Wrap the retyped text in bracketed-paste markers (ESC[200~ ... ESC[201~)
+    // so the trailing carriage return is unambiguously a SUBMIT: without the
+    // markers claude's fast-input heuristic treats the whole burst as one paste
+    // and swallows the CR as a newline, so it took two Enters to send. The
+    // ESC[201~ ends the paste, so the CR after it submits in one Enter.
+    const seq =
+      trackable && buf.length > 0 && trimmed !== buf
+        ? "\x7f".repeat(buf.length) + "\x1b[200~" + trimmed + "\x1b[201~" + "\r"
+        : "\r";
+    invoke("write_pty", { id, data: seq }).catch(() => {});
+    options.onInput?.(seq);
+    buf = "";
+    trackable = true;
+  };
+
+  // Pure modifier keydowns don't change the buffer and must not disable tracking.
+  const MODIFIER_KEYS = new Set([
+    "Shift", "Control", "Alt", "Meta", "CapsLock", "NumLock", "ScrollLock", "AltGraph",
+  ]);
+
+  // Single custom key handler (xterm keeps only ONE). Handles newline-vs-submit,
+  // clipboard shortcuts, AND mirrors keystrokes into `buf` for submit-time trim.
+  //   Enter            -> submit (trimmed, see submit())
+  //   Shift/Alt+Enter  -> newline (line feed `\n`; claude treats it as a newline,
+  //                       never a submit; verified empirically)
+  //   Cmd / Ctrl+Shift A/C/X -> Select All / Copy / Cut (canvas render hides the
+  //                       selection from the browser, so these are wired manually)
   term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
     if (event.type !== "keydown") return true;
+    const k = event.key;
 
-    if (event.key === "Enter") {
+    if (k === "Enter") {
       if ((event.shiftKey || event.altKey) && !event.ctrlKey && !event.metaKey) {
+        buf += "\n";
         invoke("write_pty", { id, data: "\n" }).catch(() => {});
         options.onInput?.("\n");
-        return false; // prevent xterm's default `\r`
+        return handled(event);
       }
-      return true;
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+        submit();
+        return handled(event);
+      }
+      return true; // other Enter chords pass through
     }
 
     const clipboardChord = isMac
       ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
       : event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey;
-
     if (clipboardChord) {
-      switch (event.key.toLowerCase()) {
+      switch (k.toLowerCase()) {
         case "a": // Select All
           term.selectAll();
-          return false;
+          return handled(event);
         case "c": // Copy
-        case "x": {
-          // Cut — terminal scrollback can't be deleted, so copy without removing.
+        case "x": { // Cut cannot delete scrollback, so it is a best-effort copy
           const sel = term.getSelection();
           if (sel) {
             navigator.clipboard?.writeText(sel).catch(() => {});
-            return false;
+            return handled(event);
           }
-          return true; // nothing selected — don't swallow the chord
+          return true; // nothing selected: don't swallow the chord
         }
+        case "v": // Paste: content we can't track -> submit as-is afterwards
+          trackable = false;
+          return true;
       }
     }
 
+    // Mirror the keystroke into our buffer model (encoding-immune via event.key).
+    if (event.ctrlKey || event.metaKey) {
+      if (event.ctrlKey && k === "c") {
+        buf = ""; // Ctrl+C clears the current prompt
+        trackable = true;
+      } else {
+        trackable = false; // other command chords: effect on the buffer is unknown
+      }
+    } else if (k === "Backspace") {
+      buf = buf.slice(0, -1);
+    } else if (k.length === 1) {
+      buf += k; // a printable character (letter, digit, space, punctuation)
+    } else if (!MODIFIER_KEYS.has(k)) {
+      trackable = false; // arrows, Home/End, Delete, Tab, Escape, F-keys, IME, etc.
+    }
     return true;
   });
 

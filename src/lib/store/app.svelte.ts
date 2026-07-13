@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { SvelteSet } from "svelte/reactivity";
 import { playDone, playBlocked } from "$lib/sound";
 
 export type AgentKind = "claude" | "shell" | "custom";
@@ -323,13 +324,28 @@ function stripFirstLine(s: string): string {
 }
 
 /**
- * POSIX single-quote a string so it can be safely typed into the shell as one arg.
- * Newlines are flattened to spaces — the prompt is typed-ahead into the PTY and
- * embedded newlines would trip the shell's line editor.
+ * Quote a string so it can be safely typed into the shell as one argument.
+ *
+ * Uses ANSI-C quoting ($'...') rather than plain single quotes so the command
+ * stays on a SINGLE physical line: the prompt is typed-ahead into the PTY, and a
+ * real embedded newline would trip the shell's line editor (submit early / show
+ * a continuation prompt). Encoding newlines as `\n` keeps the command one line
+ * while the shell still expands them to real newlines for the launched program.
+ *
+ * Leading/trailing whitespace and blank lines are trimmed; internal newlines are
+ * preserved, so a multi-line prompt reaches the agent formatted as the user typed
+ * it (minus the surrounding blank lines). Requires a bash/zsh-compatible login
+ * shell, which is the macOS default ($SHELL, falling back to /bin/bash).
  */
 export function shellQuote(s: string): string {
-  const flat = s.replace(/\s*\n+\s*/g, " ").trim();
-  return `'${flat.replace(/'/g, `'\\''`)}'`;
+  const body = s
+    .trim() // strip leading/trailing whitespace and blank lines
+    .replace(/\\/g, "\\\\") // escape backslashes first
+    .replace(/'/g, "\\'") // escape single quotes for $'...'
+    .replace(/\r/g, "") // drop carriage returns
+    .replace(/\n/g, "\\n") // real newlines -> \n (keeps command single-line)
+    .replace(/\t/g, "\\t");
+  return `$'${body}'`;
 }
 
 /** Fold a task's title + details (+ any attached file paths) into a seed prompt. */
@@ -343,7 +359,7 @@ export function buildTaskPrompt(
   if (files.length) {
     out += `\n\nAttached files:\n${files.map((a) => `- ${a.path}`).join("\n")}`;
   }
-  return out;
+  return out.trim();
 }
 
 class AppState {
@@ -383,6 +399,18 @@ class AppState {
   workspacesRatio = $state(0.42);
   /** Width (px) of the Notes page's note-list pane — user-resizable, persisted. */
   notesListWidth = $state(296);
+
+  /**
+   * Agents whose Claude/shell process the user has explicitly opened THIS run.
+   * Session-scoped and deliberately NOT persisted: on a fresh launch it starts
+   * empty, so restoring the last-active agent shows it but does NOT auto-spawn its
+   * PTY / resume Claude. A process only starts on an explicit user action —
+   * clicking its tab or roster row, switching into its workspace, creating it, or
+   * restoring it from History. This is what stops many agents from all launching at
+   * once when the app is reopened.
+   * @see TerminalPane — gates `start()` on {@link isLaunched}.
+   */
+  launchedAgentIds = new SvelteSet<string>();
 
   private loaded = false;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -586,6 +614,11 @@ class AppState {
     if (!this.activeAgentByWs[id]) {
       this.activeAgentByWs[id] = this.tabsOf(id)[0]?.id ?? null;
     }
+    // Switching into a workspace is an explicit user action → auto-resume its
+    // active agent (unlike a fresh app launch, which restores state via load()
+    // and leaves every agent dormant until clicked).
+    const activeId = this.activeAgentByWs[id];
+    if (activeId) this.launchedAgentIds.add(activeId);
   }
 
   reorderWorkspaces(draggedId: string, targetId: string) {
@@ -686,6 +719,9 @@ class AppState {
     this.agents.push(agent);
     this.activeWorkspaceId = input.workspaceId;
     this.activeAgentByWs[input.workspaceId] = agent.id;
+    // A freshly created agent is one the user just opened — launch it now (so a
+    // task-seeded prompt starts working immediately). Creation is always explicit.
+    this.launchedAgentIds.add(agent.id);
     this.persist();
     return agent;
   }
@@ -705,9 +741,28 @@ class AppState {
     if (!a) return;
     this.activeWorkspaceId = a.workspaceId;
     this.activeAgentByWs[a.workspaceId] = id;
+    // Selecting an agent (tab / roster click, tab-index shortcut, open-from-page,
+    // reopen, restore-from-history) is an explicit user open → allow its PTY to
+    // start. Distinct from the fresh-launch restore in load(), which never lands
+    // here and so leaves the agent dormant until clicked.
+    this.launchedAgentIds.add(id);
     // NOTE: merely selecting the tab does NOT clear a "done" badge — the agent keeps
     // showing "done" until the user actually clicks into its terminal (see
     // markReviewed). Blocked is never cleared this way.
+  }
+
+  /** Whether the user has explicitly opened this agent this run (see {@link launchedAgentIds}). */
+  isLaunched(id: string): boolean {
+    return this.launchedAgentIds.has(id);
+  }
+
+  /**
+   * Explicitly launch an agent's process — used by the "resume" placeholder shown
+   * when a restored/inactive agent is on screen but its Claude session hasn't been
+   * started yet this run. Idempotent.
+   */
+  launchAgent(id: string) {
+    this.launchedAgentIds.add(id);
   }
 
   /**
@@ -770,6 +825,7 @@ class AppState {
     if (!a) return;
     const ws = a.workspaceId;
     this.lastClosedAgentId = id; // Track for undo/reopen
+    this.launchedAgentIds.delete(id);
     this.agents = this.agents.filter((x) => x.id !== id);
     // Intentionally leave dangling ids in task.agentIds[] (same soft-ref convention as ActivityEntry.refId);
     // taskAgents() filters live agents only, so this id is naturally dropped from current views.
@@ -1081,7 +1137,7 @@ class AppState {
     const was = t.status;
     if (patch.title !== undefined) t.title = patch.title.trim() || t.title;
     if (patch.details !== undefined) {
-      t.details = patch.details;
+      t.details = patch.details.trim();
       t.updatedAt = Date.now();
     }
     if (patch.status !== undefined) t.status = patch.status;
