@@ -130,6 +130,66 @@ export async function createTerminal(
     options.onInput?.(data);
   });
 
+  const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
+
+  // Single custom key handler (xterm keeps only ONE — a second call replaces the
+  // first), covering two concerns:
+  //
+  // 1. Newline vs. submit, matching Claude Code's REPL:
+  //      Enter                    -> submit  (`\r`, xterm default — left alone)
+  //      Shift+Enter              -> newline (`\n`)
+  //      Option/Alt+Enter (macOS) -> newline (`\n`)
+  //    The 48-year-old VT100 limitation means most terminals send an identical
+  //    carriage return (`\r`) for Enter and Shift+Enter, so Claude reads both as
+  //    "submit". Native terminals solve this with the Kitty keyboard protocol
+  //    (Shift+Enter -> `ESC[13;2u`), which xterm.js v6 does not negotiate. We
+  //    instead write a literal line feed (`\n`) — identical to Ctrl+J, the
+  //    universal newline. (Ctrl+J and `\`+Enter already work via xterm defaults.)
+  //
+  // 2. Clipboard shortcuts. xterm renders to canvas/WebGL, so the browser's
+  //    native Cmd/Ctrl+C cannot see xterm's selection — Copy and Select All must
+  //    be wired manually. Chord is Cmd+key on macOS, Ctrl+Shift+key elsewhere
+  //    (plain Ctrl+C/X are reserved for SIGINT / readline). Paste is left to
+  //    xterm's own textarea handler, which already routes it through bracketed
+  //    paste, so intercepting it would only risk double-paste. Cut can't remove
+  //    committed terminal output, so it is a non-destructive best-effort copy.
+  term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+    if (event.type !== "keydown") return true;
+
+    if (event.key === "Enter") {
+      if ((event.shiftKey || event.altKey) && !event.ctrlKey && !event.metaKey) {
+        invoke("write_pty", { id, data: "\n" }).catch(() => {});
+        options.onInput?.("\n");
+        return false; // prevent xterm's default `\r`
+      }
+      return true;
+    }
+
+    const clipboardChord = isMac
+      ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
+      : event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey;
+
+    if (clipboardChord) {
+      switch (event.key.toLowerCase()) {
+        case "a": // Select All
+          term.selectAll();
+          return false;
+        case "c": // Copy
+        case "x": {
+          // Cut — terminal scrollback can't be deleted, so copy without removing.
+          const sel = term.getSelection();
+          if (sel) {
+            navigator.clipboard?.writeText(sel).catch(() => {});
+            return false;
+          }
+          return true; // nothing selected — don't swallow the chord
+        }
+      }
+    }
+
+    return true;
+  });
+
   const resizeDisp = term.onResize(({ cols, rows }) => {
     invoke("resize_pty", { id, cols, rows }).catch(() => {});
   });
