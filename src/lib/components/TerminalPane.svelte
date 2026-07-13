@@ -12,8 +12,14 @@
 
   let container: HTMLDivElement;
   let handle: TerminalHandle | undefined;
-  let started = false;
+  let started = $state(false);
   let seeded = false;
+
+  // Has the user explicitly opened this agent this run? Only then may its PTY /
+  // Claude session start. A restored-active agent (app reopen) is NOT launched, so
+  // it stays dormant — preventing many Claude processes from spawning at once —
+  // until clicked. (Switching into a workspace does launch its active agent.)
+  let launched = $derived(app.isLaunched(agent.id));
 
   /**
    * Choose the exact Claude command by checking whether the session file really
@@ -69,9 +75,11 @@
     handle?.focus();
   }
 
-  // Lazily start the PTY the first time this pane becomes active; refit on re-activation.
+  // Lazily start the PTY the first time this pane becomes active AND the user has
+  // opened the agent; refit on re-activation. Gating on `launched` is what keeps a
+  // restored/inactive agent's Claude session dormant until the user clicks it.
   $effect(() => {
-    if (active) {
+    if (active && launched) {
       if (!started) start();
       else requestAnimationFrame(reveal);
     }
@@ -85,6 +93,18 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="pane" class:active onpointerdown={() => app.markReviewed(agent.id)}>
   <div class="term" bind:this={container}></div>
+  {#if active && !started}
+    <!-- Agent is on screen but its process hasn't been started this run (e.g. the
+         restored-active agent right after reopening the app). Start it only on an
+         explicit click so many agents never spin up at once. -->
+    <button class="resume" onclick={() => app.launchAgent(agent.id)}>
+      <span class="dot"></span>
+      <span class="label">
+        {agent.kind === "claude" ? "Resume Claude session" : "Start agent"}
+      </span>
+      <span class="hint">Click to start · dormant to save resources</span>
+    </button>
+  {/if}
 </div>
 
 <style>
@@ -106,5 +126,40 @@
   .term {
     width: 100%;
     height: 100%;
+  }
+  /* Dormant-agent placeholder: covers the (empty) terminal until the user starts it. */
+  .resume {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: var(--term-bg);
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    font: inherit;
+    user-select: none;
+  }
+  .resume .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent, #6e8bff);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, #6e8bff) 22%, transparent);
+  }
+  .resume .label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .resume .hint {
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+  .resume:hover .label {
+    color: var(--text);
   }
 </style>

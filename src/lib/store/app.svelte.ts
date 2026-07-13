@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { SvelteSet } from "svelte/reactivity";
 import { playDone, playBlocked } from "$lib/sound";
 
 export type AgentKind = "claude" | "shell" | "custom";
@@ -384,6 +385,18 @@ class AppState {
   /** Width (px) of the Notes page's note-list pane — user-resizable, persisted. */
   notesListWidth = $state(296);
 
+  /**
+   * Agents whose Claude/shell process the user has explicitly opened THIS run.
+   * Session-scoped and deliberately NOT persisted: on a fresh launch it starts
+   * empty, so restoring the last-active agent shows it but does NOT auto-spawn its
+   * PTY / resume Claude. A process only starts on an explicit user action —
+   * clicking its tab or roster row, switching into its workspace, creating it, or
+   * restoring it from History. This is what stops many agents from all launching at
+   * once when the app is reopened.
+   * @see TerminalPane — gates `start()` on {@link isLaunched}.
+   */
+  launchedAgentIds = new SvelteSet<string>();
+
   private loaded = false;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -586,6 +599,11 @@ class AppState {
     if (!this.activeAgentByWs[id]) {
       this.activeAgentByWs[id] = this.tabsOf(id)[0]?.id ?? null;
     }
+    // Switching into a workspace is an explicit user action → auto-resume its
+    // active agent (unlike a fresh app launch, which restores state via load()
+    // and leaves every agent dormant until clicked).
+    const activeId = this.activeAgentByWs[id];
+    if (activeId) this.launchedAgentIds.add(activeId);
   }
 
   reorderWorkspaces(draggedId: string, targetId: string) {
@@ -686,6 +704,9 @@ class AppState {
     this.agents.push(agent);
     this.activeWorkspaceId = input.workspaceId;
     this.activeAgentByWs[input.workspaceId] = agent.id;
+    // A freshly created agent is one the user just opened — launch it now (so a
+    // task-seeded prompt starts working immediately). Creation is always explicit.
+    this.launchedAgentIds.add(agent.id);
     this.persist();
     return agent;
   }
@@ -705,9 +726,28 @@ class AppState {
     if (!a) return;
     this.activeWorkspaceId = a.workspaceId;
     this.activeAgentByWs[a.workspaceId] = id;
+    // Selecting an agent (tab / roster click, tab-index shortcut, open-from-page,
+    // reopen, restore-from-history) is an explicit user open → allow its PTY to
+    // start. Distinct from the fresh-launch restore in load(), which never lands
+    // here and so leaves the agent dormant until clicked.
+    this.launchedAgentIds.add(id);
     // NOTE: merely selecting the tab does NOT clear a "done" badge — the agent keeps
     // showing "done" until the user actually clicks into its terminal (see
     // markReviewed). Blocked is never cleared this way.
+  }
+
+  /** Whether the user has explicitly opened this agent this run (see {@link launchedAgentIds}). */
+  isLaunched(id: string): boolean {
+    return this.launchedAgentIds.has(id);
+  }
+
+  /**
+   * Explicitly launch an agent's process — used by the "resume" placeholder shown
+   * when a restored/inactive agent is on screen but its Claude session hasn't been
+   * started yet this run. Idempotent.
+   */
+  launchAgent(id: string) {
+    this.launchedAgentIds.add(id);
   }
 
   /**
@@ -770,6 +810,7 @@ class AppState {
     if (!a) return;
     const ws = a.workspaceId;
     this.lastClosedAgentId = id; // Track for undo/reopen
+    this.launchedAgentIds.delete(id);
     this.agents = this.agents.filter((x) => x.id !== id);
     // Intentionally leave dangling ids in task.agentIds[] (same soft-ref convention as ActivityEntry.refId);
     // taskAgents() filters live agents only, so this id is naturally dropped from current views.
