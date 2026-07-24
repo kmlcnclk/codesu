@@ -53,6 +53,11 @@ export async function createTerminal(
     fontSize: 13,
     lineHeight: 1.2,
     scrollback: 5000,
+    // xterm defaults to 1 line per wheel notch, which feels painfully slow. Bump
+    // both so mouse-wheel scrolling covers real ground. (These apply to line/page
+    // wheel deltas; trackpad pixel-scrolling is 1:1 and unaffected.)
+    scrollSensitivity: 5,
+    fastScrollSensitivity: 10,
     cursorBlink: true,
     allowProposedApi: true,
     // Kept in sync with the CSS theme tokens in src/app.css (xterm needs literal
@@ -70,13 +75,24 @@ export async function createTerminal(
   term.loadAddon(fitAddon);
   term.open(container);
 
-  try {
-    const webgl = new WebglAddon();
-    webgl.onContextLoss(() => webgl.dispose());
-    term.loadAddon(webgl);
-  } catch (err) {
-    console.warn("[Codesu] WebGL renderer unavailable, using DOM renderer", err);
-  }
+  // Load the WebGL renderer, and RE-LOAD it if the GPU context is lost. WKWebView
+  // drops the WebGL context on things like tab switches or display sleep; the old
+  // code only disposed the addon on loss, leaving xterm on its slow DOM renderer
+  // for the rest of the session — that showed up as permanently laggy scrolling.
+  // Recreating the addon keeps hardware rendering (and smooth scroll) alive.
+  const loadWebgl = () => {
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        webgl.dispose();
+        setTimeout(loadWebgl, 0); // rebuild on a fresh context
+      });
+      term.loadAddon(webgl);
+    } catch (err) {
+      console.warn("[Codesu] WebGL renderer unavailable, using DOM renderer", err);
+    }
+  };
+  loadWebgl();
 
   try {
     fitAddon.fit();
@@ -155,26 +171,40 @@ export async function createTerminal(
     return false;
   };
 
-  // Plain Enter submits. First trim leading/trailing whitespace (blank lines AND
-  // spaces) from the prompt: clear claude's buffer with one Backspace per tracked
-  // character (the cursor sits at the end after linear typing, and Backspace
-  // joins lines), retype the trimmed text, then submit with a carriage return —
-  // all in one write so the bytes arrive in order. Verified against the claude
-  // CLI editor (kitty mode on). If the buffer is untrackable or needs no trim,
-  // submit as-is so we never corrupt what the user typed.
+  // Send a chunk to the PTY and mirror it to the activity monitor.
+  const write = (data: string) => {
+    invoke("write_pty", { id, data }).catch(() => {});
+    options.onInput?.(data);
+  };
+
+  // Plain Enter submits, optionally trimming leading/trailing whitespace first.
+  //
+  // The trim MUST NOT corrupt input, so it is deliberately conservative:
+  //   - Only when the prompt is fully `trackable` (pure linear typing, cursor at
+  //     the end) and single-line — we never backspace across newlines, which is
+  //     where the old code mangled multi-line prompts.
+  //   - Trailing-only whitespace (the common case, e.g. a stray end space) is
+  //     removed by deleting exactly those characters — no full-line retype.
+  //   - Leading whitespace additionally needs a retype; that text is wrapped in
+  //     bracketed-paste markers so claude treats it as pasted content.
+  //
+  // The submitting carriage return is ALWAYS sent as a SEPARATE, deferred write.
+  // Sending the edit and the CR in one burst let claude's paste-detection
+  // heuristic fold them together and swallow the CR as a newline — that was the
+  // "double Enter" bug. A tiny gap makes the CR read as a real submit keypress.
   const submit = () => {
     const trimmed = buf.trim();
-    // Wrap the retyped text in bracketed-paste markers (ESC[200~ ... ESC[201~)
-    // so the trailing carriage return is unambiguously a SUBMIT: without the
-    // markers claude's fast-input heuristic treats the whole burst as one paste
-    // and swallows the CR as a newline, so it took two Enters to send. The
-    // ESC[201~ ends the paste, so the CR after it submits in one Enter.
-    const seq =
-      trackable && buf.length > 0 && trimmed !== buf
-        ? "\x7f".repeat(buf.length) + "\x1b[200~" + trimmed + "\x1b[201~" + "\r"
-        : "\r";
-    invoke("write_pty", { id, data: seq }).catch(() => {});
-    options.onInput?.(seq);
+    const canTrim = trackable && buf.length > 0 && !buf.includes("\n") && trimmed !== buf;
+
+    if (!canTrim) {
+      write("\r"); // nothing to trim (or untrackable/multi-line): submit verbatim
+    } else {
+      const edit = buf.startsWith(trimmed)
+        ? "\x7f".repeat(buf.length - trimmed.length) // trailing whitespace only
+        : "\x7f".repeat(buf.length) + "\x1b[200~" + trimmed + "\x1b[201~";
+      write(edit);
+      setTimeout(() => write("\r"), 12); // separate keypress → reliable single-Enter submit
+    }
     buf = "";
     trackable = true;
   };
@@ -198,8 +228,7 @@ export async function createTerminal(
     if (k === "Enter") {
       if ((event.shiftKey || event.altKey) && !event.ctrlKey && !event.metaKey) {
         buf += "\n";
-        invoke("write_pty", { id, data: "\n" }).catch(() => {});
-        options.onInput?.("\n");
+        write("\n");
         return handled(event);
       }
       if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
@@ -269,7 +298,9 @@ export async function createTerminal(
         const handler = () => {
           lastScrollPos = viewportElement.scrollTop;
         };
-        viewportElement.addEventListener("scroll", handler);
+        // Passive: this listener never calls preventDefault, so telling the browser
+        // that up front keeps scrolling off the blocking path (smoother wheel scroll).
+        viewportElement.addEventListener("scroll", handler, { passive: true });
         return () => viewportElement.removeEventListener("scroll", handler);
       })()
     : () => {};
@@ -278,6 +309,10 @@ export async function createTerminal(
     fit: () => {
       try {
         fitAddon.fit();
+        // Force a redraw. When a pane is revealed after being display:none, fit()
+        // is a no-op if the size is unchanged, and the WebGL renderer can leave a
+        // stale/blank canvas (menus look broken/unselectable). A refresh repaints.
+        term.refresh(0, term.rows - 1);
       } catch {
         /* container not visible yet */
       }

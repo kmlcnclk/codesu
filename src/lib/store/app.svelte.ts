@@ -767,8 +767,14 @@ class AppState {
 
   /**
    * The user interacted with an agent's terminal (clicked or typed into it). A
-   * finished agent is now considered reviewed → resolves to idle. Blocked is left
-   * untouched: it only clears when Claude actually resumes working.
+   * finished (done) agent is now reviewed → idle. A blocked agent is also cleared:
+   * the user is here handling it, so the red "needs input" pulse has done its job.
+   *
+   * Clearing blocked MUST also wipe the detection tail/spell — otherwise the stale
+   * prompt phrase still sitting in the tail would re-trigger "blocked" on the very
+   * next monitor tick, which is the "stuck error animation that won't clear" bug.
+   * If Claude genuinely wants more input it redraws its prompt (new output), which
+   * re-blocks cleanly; a live spinner still takes it straight to "working".
    */
   markReviewed(id: string) {
     const a = this.agents.find((x) => x.id === id);
@@ -777,6 +783,14 @@ class AppState {
     if (rec) rec.reviewPending = false;
     if (a.state === "done") {
       a.acknowledged = true;
+      a.state = "idle";
+      a.stateChangedAt = Date.now();
+    } else if (a.state === "blocked") {
+      if (rec) {
+        rec.tail = "";
+        rec.spell = false;
+        rec.alertedBlocked = false;
+      }
       a.state = "idle";
       a.stateChangedAt = Date.now();
     }
