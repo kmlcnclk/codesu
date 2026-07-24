@@ -102,6 +102,20 @@ fn open_in_editor(path: String, editor: String) -> Result<(), String> {
     editor::open_in_editor(&path, &editor)
 }
 
+// ---------- Asset protocol ----------
+
+/// Grant the asset protocol read access to a single file at runtime.
+///
+/// The static `assetProtocol.scope` is empty; instead the UI calls this for the
+/// specific files a user attaches, so the webview can only ever load images the
+/// user explicitly picked — never the whole filesystem.
+#[tauri::command]
+fn allow_asset(app: AppHandle, path: String) -> Result<(), String> {
+    app.asset_protocol_scope()
+        .allow_file(&path)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -120,7 +134,8 @@ pub fn run() {
             load_state,
             save_state,
             claude_session_exists,
-            open_in_editor
+            open_in_editor,
+            allow_asset
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
