@@ -111,6 +111,14 @@
       else if (shortcut.action === "new-claude-agent") {
         if (app.activeWorkspaceId) app.newClaudeInActive();
         else showNewWorkspace = true;
+      } else if (shortcut.action === "split-pane-vertical") {
+        if (app.activeWorkspaceId) app.splitFocused("row");
+        else showNewWorkspace = true;
+      } else if (shortcut.action === "split-pane-horizontal") {
+        if (app.activeWorkspaceId) app.splitFocused("col");
+        else showNewWorkspace = true;
+      } else if (shortcut.action === "flip-split") {
+        if (app.activeAgent) app.flipSplitOf(app.activeAgent.id);
       } else if (shortcut.action === "close-current-agent") {
         if (app.activeAgent) {
           app.removeAgent(app.activeAgent.id);

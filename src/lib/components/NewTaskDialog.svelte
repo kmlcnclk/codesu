@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { convertFileSrc } from "@tauri-apps/api/core";
+  import { convertFileSrc, invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
   import { openPath } from "@tauri-apps/plugin-opener";
   import Modal from "./Modal.svelte";
@@ -30,6 +30,22 @@
   // svelte-ignore state_referenced_locally
   let status = $state<TaskStatus>(initial?.status ?? initialStatus ?? "backlog");
   let attachments = $state<TaskAttachment[]>(initial ? [...initial.attachments] : []);
+
+  // The asset protocol scope is empty by default; grant access per image the
+  // moment it appears (newly attached or loaded from a saved task) so the
+  // webview can thumbnail only these files, never the whole filesystem.
+  let allowed = $state<Set<string>>(new Set());
+  const requested = new Set<string>();
+  $effect(() => {
+    for (const a of attachments) {
+      if (!a.isImage || requested.has(a.path)) continue;
+      requested.add(a.path);
+      const p = a.path;
+      invoke("allow_asset", { path: p })
+        .then(() => (allowed = new Set(allowed).add(p)))
+        .catch((e) => console.error("[Codesu] allow_asset failed", e));
+    }
+  });
 
   async function addFiles() {
     const picked = await open({ multiple: true, title: "Attach files to task" });
@@ -120,7 +136,7 @@
           {#each attachments as a (a.id)}
             <li class="att" class:img={a.isImage}>
               <button type="button" class="att-open" title={a.path} onclick={() => openAttachment(a)}>
-                {#if a.isImage}
+                {#if a.isImage && allowed.has(a.path)}
                   <img class="thumb" src={convertFileSrc(a.path)} alt={a.name} loading="lazy" />
                 {:else}
                   <span class="doc"><Icon name="file" size={18} /></span>

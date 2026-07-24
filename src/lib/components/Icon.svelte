@@ -29,6 +29,13 @@
     terminal:
       "<rect x='2' y='4' width='20' height='16' rx='2.2'/><path d='M7 9l3 3-3 3'/><path d='M13 15h4'/>",
     close: "<path d='M18 6 6 18'/><path d='M6 6l12 12'/>",
+    // split-pane controls
+    columns:
+      "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M12 4v16'/>",
+    rows:
+      "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M3 12h18'/>",
+    flip:
+      "<path d='M12 4v16'/><path d='M8 8 4 12l4 4'/><path d='M16 8l4 4-4 4'/>",
     grip:
       "<circle cx='9' cy='6' r='1.1' fill='currentColor' stroke='none'/><circle cx='9' cy='12' r='1.1' fill='currentColor' stroke='none'/><circle cx='9' cy='18' r='1.1' fill='currentColor' stroke='none'/><circle cx='15' cy='6' r='1.1' fill='currentColor' stroke='none'/><circle cx='15' cy='12' r='1.1' fill='currentColor' stroke='none'/><circle cx='15' cy='18' r='1.1' fill='currentColor' stroke='none'/>",
     // objects
