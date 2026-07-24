@@ -50,12 +50,37 @@ pub fn is_git_repo(path: &str) -> bool {
     git(path, &["rev-parse", "--is-inside-work-tree"]).is_ok()
 }
 
-/// Sanitize a branch name into a directory-safe segment.
-fn sanitize(branch: &str) -> String {
-    branch.replace(['/', ' ', ':'], "-")
+/// Sanitize a branch or repo name into a directory-safe segment.
+fn sanitize(name: &str) -> String {
+    name.replace(['/', ' ', ':'], "-")
 }
 
-/// Create a worktree under `<repo>/.worktrees/<branch>` on a new branch off `base_ref`.
+/// Resolve the user's home directory (`$HOME`, or `%USERPROFILE%` on Windows).
+fn home_dir() -> Result<PathBuf, String> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "could not resolve home directory".into())
+}
+
+/// Central root for all codesu worktrees: `~/.codesu/worktrees`.
+///
+/// Worktrees live here — outside every repo — the way Conductor (`~/conductor/workspaces`)
+/// and herdr (`~/.herdr/worktrees`) do, so they never pollute the source repo.
+fn codesu_worktrees_root() -> Result<PathBuf, String> {
+    Ok(home_dir()?.join(".codesu").join("worktrees"))
+}
+
+/// The last path segment of `repo`, used to group worktrees by repository.
+fn repo_name(repo: &str) -> String {
+    Path::new(repo)
+        .file_name()
+        .map(|n| sanitize(&n.to_string_lossy()))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "repo".into())
+}
+
+/// Create a worktree under `~/.codesu/worktrees/<repo-name>/<branch>` on a new branch off `base_ref`.
 pub fn create_worktree(
     repo: &str,
     branch: &str,
@@ -67,9 +92,16 @@ pub fn create_worktree(
     }
     let base = base_ref.filter(|b| !b.is_empty()).unwrap_or_else(|| "HEAD".into());
 
-    let mut path = PathBuf::from(repo);
-    path.push(".worktrees");
+    let mut path = codesu_worktrees_root()?;
+    path.push(repo_name(repo));
     path.push(sanitize(branch));
+
+    // Ensure the parent (`~/.codesu/worktrees/<repo-name>`) exists; `git worktree add`
+    // creates the leaf dir itself but not the intermediate ones.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create worktree directory {}: {e}", parent.display()))?;
+    }
     let path_str = path.to_string_lossy().to_string();
 
     git(
