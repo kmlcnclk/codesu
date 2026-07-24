@@ -78,10 +78,20 @@
   // Lazily start the PTY the first time this pane becomes active AND the user has
   // opened the agent; refit on re-activation. Gating on `launched` is what keeps a
   // restored/inactive agent's Claude session dormant until the user clicks it.
+  //
+  // `launched` also flips back to false when the idle-reaper puts an unused,
+  // off-screen agent to sleep (see AppState.sleepAgent). We tear the PTY down here
+  // but keep the Claude session — reopening resumes it via `claude --resume`, and
+  // the "Resume" placeholder returns because `started` drops back to false.
   $effect(() => {
     if (active && launched) {
       if (!started) start();
       else requestAnimationFrame(reveal);
+    } else if (started && !launched) {
+      handle?.dispose();
+      handle = undefined;
+      started = false;
+      seeded = false;
     }
   });
 

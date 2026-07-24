@@ -99,6 +99,14 @@ const SPINNER_STALE_MS = 2000;
 const WORKING_QUIET_MS = 600;
 /** How often the activity monitor re-derives every agent's state. */
 const MONITOR_TICK_MS = 200;
+/**
+ * How long a launched, off-screen agent may sit unused before its PTY is reclaimed
+ * to free system resources. The Claude session is NOT lost — it's resumed via
+ * `claude --resume` the next time the agent is opened. See {@link AppState.reapIdleAgents}.
+ */
+const IDLE_SLEEP_MS = 60 * 60 * 1000; // 1 hour
+/** How often the idle-reaper looks for agents to put to sleep. */
+const REAP_TICK_MS = 60 * 1000; // 1 minute
 /** Bytes of stripped tail we retain per agent for prompt detection. */
 const TAIL_CAP = 3000;
 
@@ -412,6 +420,15 @@ class AppState {
    */
   launchedAgentIds = new SvelteSet<string>();
 
+  /**
+   * Agents whose PTY we deliberately killed to reclaim resources (idle > 1h and
+   * off-screen — see {@link reapIdleAgents}). Their Claude session is untouched and
+   * resumes on reopen. Tracked so the `session-exited` event that killing fires is
+   * recognised as an intentional sleep, not a real termination (see {@link markExited}).
+   * Session-scoped and deliberately NOT persisted.
+   */
+  private sleepingAgentIds = new Set<string>();
+
   private loaded = false;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -618,7 +635,11 @@ class AppState {
     // active agent (unlike a fresh app launch, which restores state via load()
     // and leaves every agent dormant until clicked).
     const activeId = this.activeAgentByWs[id];
-    if (activeId) this.launchedAgentIds.add(activeId);
+    if (activeId) {
+      this.launchedAgentIds.add(activeId);
+      const a = this.agents.find((x) => x.id === activeId);
+      if (a) a.lastUsedAt = Date.now(); // opened → clear of the idle-reaper
+    }
   }
 
   reorderWorkspaces(draggedId: string, targetId: string) {
@@ -739,6 +760,9 @@ class AppState {
   setActiveAgent(id: string) {
     const a = this.agents.find((x) => x.id === id);
     if (!a) return;
+    // Opening an agent's terminal counts as using it → keep it clear of the
+    // idle-reaper (which sleeps agents untouched for over an hour).
+    a.lastUsedAt = Date.now();
     this.activeWorkspaceId = a.workspaceId;
     this.activeAgentByWs[a.workspaceId] = id;
     // Selecting an agent (tab / roster click, tab-index shortcut, open-from-page,
@@ -762,7 +786,34 @@ class AppState {
    * started yet this run. Idempotent.
    */
   launchAgent(id: string) {
+    // Reopening a slept agent cancels its pending sleep and refreshes recency so
+    // the reaper doesn't immediately sleep it again.
+    this.sleepingAgentIds.delete(id);
+    const a = this.agents.find((x) => x.id === id);
+    if (a) a.lastUsedAt = Date.now();
     this.launchedAgentIds.add(id);
+  }
+
+  /**
+   * Put an idle, off-screen agent to sleep: kill its PTY to free system resources
+   * while KEEPING its Claude session intact. Removing it from {@link launchedAgentIds}
+   * makes its {@link import("$lib/components/TerminalPane.svelte")} tear the process
+   * down; reopening the agent resumes the conversation via `claude --resume`.
+   *
+   * The roster {@link Agent.state}/{@link Agent.stateChangedAt} are deliberately left
+   * untouched so the sidebar order is unchanged — a sleeping agent looks exactly like
+   * it did, it just isn't holding a process. Only the transient run `status` drops
+   * back to idle. Idempotent; a no-op for an agent that isn't launched.
+   */
+  sleepAgent(id: string) {
+    if (!this.launchedAgentIds.has(id)) return;
+    const a = this.agents.find((x) => x.id === id);
+    if (!a) return;
+    // Flag the imminent PTY exit as intentional (see markExited) BEFORE tearing down.
+    this.sleepingAgentIds.add(id);
+    this.launchedAgentIds.delete(id); // TerminalPane disposes the PTY in response
+    a.status = "idle";
+    this.activity.delete(id); // drop stale spinner/tail tracking
   }
 
   /**
@@ -773,6 +824,9 @@ class AppState {
   markReviewed(id: string) {
     const a = this.agents.find((x) => x.id === id);
     if (!a) return;
+    // Interacting with the terminal counts as using the agent → keep it clear of
+    // the idle-reaper.
+    a.lastUsedAt = Date.now();
     const rec = this.activity.get(id);
     if (rec) rec.reviewPending = false;
     if (a.state === "done") {
@@ -879,6 +933,18 @@ class AppState {
   }
 
   markExited(id: string, code: number | null) {
+    // An agent we intentionally put to sleep fires this same exit event when its
+    // PTY is killed. That's not a real termination — leave it dormant (idle) so it
+    // shows the "Resume" placeholder, not the "exited" state, and can be reopened.
+    // (If the user already reopened it, isLaunched is true again → don't touch it.)
+    if (this.sleepingAgentIds.has(id)) {
+      this.sleepingAgentIds.delete(id);
+      const slept = this.agents.find((x) => x.id === id);
+      if (slept && !this.launchedAgentIds.has(id) && slept.status !== "exited") {
+        slept.status = "idle";
+      }
+      return;
+    }
     const a = this.agents.find((x) => x.id === id);
     if (a) {
       a.status = "exited";
@@ -1335,6 +1401,43 @@ class AppState {
   private ensureMonitor() {
     if (this.monitorTimer || typeof window === "undefined") return;
     this.monitorTimer = setInterval(() => this.tickMonitor(), MONITOR_TICK_MS);
+  }
+
+  private reaperTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** Start the idle-reaper (once). Called from load() so it runs the whole session. */
+  ensureReaper() {
+    if (this.reaperTimer || typeof window === "undefined") return;
+    this.reaperTimer = setInterval(() => this.reapIdleAgents(), REAP_TICK_MS);
+  }
+
+  /**
+   * Sleep every launched agent that has gone unused for over an hour and isn't the
+   * one currently on screen — reclaiming its Claude process while preserving the
+   * session (see {@link sleepAgent}). This is what stops idle agents from holding
+   * system resources; the user reopening any of them resumes it losslessly.
+   *
+   * Deliberately conservative about WHICH agents qualify:
+   *   - the on-screen (active) agent is never slept — the user has it open;
+   *   - only Claude agents, whose sessions resume via `--resume` (a shell's live
+   *     process state would be lost, so those are left running);
+   *   - only quiescent agents (idle/done) — never one mid-turn (working) or waiting
+   *     on the user (blocked), which killing would interrupt.
+   */
+  private reapIdleAgents() {
+    const now = Date.now();
+    // The agent currently on screen = the active agent of the active workspace.
+    const onScreenId = this.activeWorkspaceId
+      ? this.activeAgentByWs[this.activeWorkspaceId]
+      : null;
+    for (const a of this.agents) {
+      if (a.id === onScreenId) continue; // never sleep what the user has open
+      if (!this.launchedAgentIds.has(a.id)) continue; // no live PTY to reclaim
+      if (a.kind !== "claude") continue; // only Claude sessions resume losslessly
+      if (a.state !== "idle" && a.state !== "done") continue; // don't interrupt work
+      if (now - a.lastUsedAt < IDLE_SLEEP_MS) continue; // used recently enough
+      this.sleepAgent(a.id);
+    }
   }
 
   private tickMonitor() {
@@ -1807,6 +1910,8 @@ class AppState {
     } finally {
       this.loaded = true;
     }
+    // Begin reclaiming idle agents' processes (their sessions are preserved).
+    this.ensureReaper();
     // Save any migration (newly-assigned session ids) back to disk.
     this.persist();
   }
