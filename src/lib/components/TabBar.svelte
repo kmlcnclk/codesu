@@ -1,6 +1,14 @@
 <script lang="ts">
   import { flip } from "svelte/animate";
-  import { app, TASK_STATUSES, TASK_META, STATE_META, type Agent } from "$lib/store/app.svelte";
+  import {
+    app,
+    TASK_STATUSES,
+    TASK_META,
+    STATE_META,
+    STATE_RANK,
+    type Agent,
+    type AgentState,
+  } from "$lib/store/app.svelte";
   import ContextMenu, { type MenuItem } from "./ContextMenu.svelte";
   import Icon from "./Icon.svelte";
 
@@ -8,7 +16,19 @@
 
   let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
-  // Inline rename (double-click a tab, or "Rename" from its menu).
+  /** The representative pane of a tab: the focused one if it's here, else the first. */
+  function repOf(agents: Agent[]): Agent {
+    return agents.find((a) => a.id === app.activeAgent?.id) ?? agents[0];
+  }
+  /** The tab's aggregate live state = its highest-priority pane (blocked→done→…). */
+  function tabState(agents: Agent[]): AgentState {
+    return agents.reduce<AgentState>(
+      (best, a) => (STATE_RANK[a.state] < STATE_RANK[best] ? a.state : best),
+      "exited",
+    );
+  }
+
+  // Inline rename (double-click a tab, or "Rename" from its menu) — renames the rep.
   let editingId = $state<string | null>(null);
   let editValue = $state("");
   function startRename(agent: Agent) {
@@ -34,15 +54,15 @@
   }
 
   // ---- pointer-based drag reorder (reliable in the webview; HTML5 DnD is not) ----
-  let dragId = $state<string | null>(null);
+  let dragId = $state<string | null>(null); // the dragged tab's groupId
   let dragMoved = $state(false);
   let startX = 0;
   let lastIdx = -1;
   let suppressClick = false;
 
-  function onPointerDown(e: PointerEvent, agent: Agent) {
+  function onPointerDown(e: PointerEvent, groupId: string) {
     if (e.button !== 0 || editingId) return;
-    dragId = agent.id;
+    dragId = groupId;
     startX = e.clientX;
     dragMoved = false;
     lastIdx = -1;
@@ -52,20 +72,17 @@
     if (dragId === null) return;
     if (!dragMoved && Math.abs(e.clientX - startX) < 4) return;
     dragMoved = true;
-    // Insertion slot = how many *other* tabs sit left of the cursor's center.
     const others = Array.from(
       document.querySelectorAll<HTMLElement>(".tabs .tab"),
-    ).filter((el) => el.dataset.id !== dragId);
+    ).filter((el) => el.dataset.gid !== dragId);
     let idx = 0;
     for (const el of others) {
       const r = el.getBoundingClientRect();
       if (e.clientX > r.left + r.width / 2) idx++;
     }
-    // Only reorder when the slot actually changes — reordering every frame churns
-    // reactivity + flip animations and makes the drag feel laggy.
     if (idx === lastIdx) return;
     lastIdx = idx;
-    app.moveAgentToIndex(dragId, idx);
+    app.moveTabToIndex(dragId, idx);
   }
   function onPointerUp(e: PointerEvent) {
     if (dragId === null) return;
@@ -78,60 +95,68 @@
     dragId = null;
     dragMoved = false;
   }
-  function onTabClick(agent: Agent) {
+  function onTabClick(groupId: string) {
     if (suppressClick) {
       suppressClick = false;
       return;
     }
-    if (editingId !== agent.id) app.setActiveAgent(agent.id);
+    if (editingId === null) app.setActiveTab(groupId);
   }
 
-  function openMenu(e: MouseEvent, agent: Agent) {
+  function openMenu(e: MouseEvent, groupId: string, rep: Agent, paneCount: number) {
     e.preventDefault();
     const items: MenuItem[] = [
-      { label: "Rename agent", onSelect: () => startRename(agent) },
+      { label: "Rename tab", onSelect: () => startRename(rep) },
     ];
     TASK_STATUSES.forEach((s, idx) =>
       items.push({
         label: TASK_META[s].label,
         color: TASK_META[s].color,
-        checked: app.effectiveLane(agent) === s,
+        checked: app.effectiveLane(rep) === s,
         separatorBefore: idx === 0,
-        onSelect: () => app.setAgentLane(agent.id, s),
+        onSelect: () => app.setGroupLane(groupId, s),
       }),
     );
-    items.push({ label: "Close agent", danger: true, separatorBefore: true, onSelect: () => app.removeAgent(agent.id) });
+    items.push({
+      label: paneCount > 1 ? `Close tab (${paneCount} panes)` : "Close tab",
+      danger: true,
+      separatorBefore: true,
+      onSelect: () => app.closeTab(groupId),
+    });
     menu = { x: e.clientX, y: e.clientY, items };
   }
 </script>
 
 <div class="tabbar">
   <div class="tabs">
-    {#each app.activeTabs as agent, i (agent.id)}
-      {@const meta = STATE_META[agent.state]}
-      {@const taskMeta = TASK_META[app.effectiveLane(agent)]}
-      {@const editing = editingId === agent.id}
+    {#each app.activeTabGroups as group, i (group.groupId)}
+      {@const rep = repOf(group.agents)}
+      {@const st = tabState(group.agents)}
+      {@const meta = STATE_META[st]}
+      {@const taskMeta = TASK_META[app.effectiveLane(rep)]}
+      {@const editing = editingId === rep.id}
+      {@const panes = group.agents.length}
       <div
         class="tab"
-        class:active={agent.id === app.activeAgent?.id}
-        class:dragging={dragId === agent.id && dragMoved}
-        data-id={agent.id}
-        data-state={agent.state}
-        data-task={app.effectiveLane(agent)}
+        class:active={group.groupId === app.activeGroup}
+        class:dragging={dragId === group.groupId && dragMoved}
+        data-gid={group.groupId}
+        data-state={st}
+        data-task={app.effectiveLane(rep)}
         style="--state:{meta.color}; --tint:{taskMeta.color}"
         role="tab"
         tabindex="0"
         animate:flip={{ duration: 160 }}
-        onpointerdown={(e) => onPointerDown(e, agent)}
+        onpointerdown={(e) => onPointerDown(e, group.groupId)}
         onpointermove={onPointerMove}
         onpointerup={onPointerUp}
         onpointercancel={onPointerUp}
-        onclick={() => onTabClick(agent)}
-        ondblclick={() => startRename(agent)}
-        oncontextmenu={(e) => openMenu(e, agent)}
-        onkeydown={(e) => e.key === "Enter" && !editing && app.setActiveAgent(agent.id)}
+        onclick={() => onTabClick(group.groupId)}
+        ondblclick={() => startRename(rep)}
+        oncontextmenu={(e) => openMenu(e, group.groupId, rep, panes)}
+        onkeydown={(e) => e.key === "Enter" && !editing && app.setActiveTab(group.groupId)}
       >
-        <span class="state-dot" data-state={agent.state} title={meta.label}></span>
+        <span class="state-dot" data-state={st} title={meta.label}></span>
         {#if editing}
           <input
             class="rename-input"
@@ -142,21 +167,22 @@
             onpointerdown={(e) => e.stopPropagation()}
             onkeydown={(e) => {
               e.stopPropagation();
-              editKey(e, agent.id);
+              editKey(e, rep.id);
             }}
-            onblur={() => commit(agent.id)}
+            onblur={() => commit(rep.id)}
           />
         {:else}
-          <span class="name">{agent.name}</span>
+          <span class="name">{rep.name}</span>
+          {#if panes > 1}<span class="panes" title="{panes} panes"><Icon name="columns" size={11} />{panes}</span>{/if}
           {#if i < 9}<span class="hint">⌘{i + 1}</span>{/if}
           <button
             class="close"
-            title="Close"
-            aria-label="Close agent"
+            title={panes > 1 ? `Close tab (${panes} panes)` : "Close"}
+            aria-label="Close tab"
             onpointerdown={(e) => e.stopPropagation()}
             onclick={(e) => {
               e.stopPropagation();
-              app.removeAgent(agent.id);
+              app.closeTab(group.groupId);
             }}><Icon name="close" size={13} /></button
           >
         {/if}
@@ -264,6 +290,18 @@
     max-width: 160px;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  /* Small badge showing how many panes a split tab holds. */
+  .panes {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-muted);
+    background: var(--surface-4);
+    padding: 1px 5px 1px 4px;
+    border-radius: 6px;
   }
   .hint {
     font-size: 9.5px;

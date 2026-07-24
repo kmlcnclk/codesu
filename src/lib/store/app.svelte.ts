@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { SvelteSet } from "svelte/reactivity";
 import { playDone, playBlocked } from "$lib/sound";
+import {
+  type LayoutNode,
+  type Dir,
+  leaf as makeLeaf,
+  collectLeafIds,
+  findLeafPath,
+  splitLeaf,
+  removeLeaf,
+  flipParent,
+  resizeAt,
+} from "$lib/terminal/layout";
 
 export type AgentKind = "claude" | "shell" | "custom";
 export type RunStatus = "idle" | "running" | "exited";
@@ -224,6 +235,13 @@ const WORKSPACE_COLORS = [
 export interface Agent {
   id: string;
   workspaceId: string;
+  /**
+   * The tab this agent belongs to. Agents sharing a `groupId` are panes of ONE
+   * tab and are shown together in a split layout (see {@link AppState.layoutOf}).
+   * A brand-new agent gets its own singleton group (groupId === its own id); ⌘D
+   * spawns a new agent INTO the focused pane's group.
+   */
+  groupId: string;
   name: string;
   kind: AgentKind;
   /** Program auto-run in the shell (null => plain shell). */
@@ -379,8 +397,16 @@ class AppState {
   /** Transient: a task the board should scroll to & flash (e.g. opened from a note). */
   focusTaskId = $state<string | null>(null);
   activeWorkspaceId = $state<string | null>(null);
-  /** Per-workspace active agent id. */
+  /** Per-workspace active agent id (the FOCUSED pane — always a leaf of the active tab). */
   activeAgentByWs = $state<Record<string, string | null>>({});
+  /** Per-workspace active tab id (a `groupId`). The tab whose split grid is on screen. */
+  activeTabByWs = $state<Record<string, string | null>>({});
+  /**
+   * Split layout per tab, keyed by `groupId`. Absent → the tab is a single full
+   * pane (its one agent). Persisted so arrangements survive restarts. See
+   * {@link import("$lib/terminal/layout").LayoutNode}.
+   */
+  tabLayouts = $state<Record<string, LayoutNode>>({});
   /** Default project paths to pre-populate in workspace creation. */
   defaultProjects = $state<string[]>([]);
   /** System terminal scroll position memory. */
@@ -445,6 +471,9 @@ class AppState {
 
       // Agents page only
       { id: "new-claude-agent", name: "New Claude Agent", key: "t", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "new-claude-agent" },
+      { id: "split-pane-vertical", name: "Split Pane (side by side)", key: "d", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "split-pane-vertical" },
+      { id: "split-pane-horizontal", name: "Split Pane (stacked)", key: "d", ctrl: false, shift: true, alt: false, meta: true, context: "agents", action: "split-pane-horizontal" },
+      { id: "flip-split", name: "Flip Split Direction", key: "e", ctrl: false, shift: true, alt: false, meta: true, context: "agents", action: "flip-split" },
       { id: "close-current-agent", name: "Close Current Agent", key: "Delete", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "close-current-agent" },
       { id: "reopen-last-agent", name: "Reopen Last Closed Agent", key: "z", ctrl: false, shift: true, alt: false, meta: true, context: "agents", action: "reopen-last-agent" },
       { id: "select-tab-1", name: "Select Tab 1", key: "1", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "select-tab-1" },
@@ -504,11 +533,22 @@ class AppState {
   get activeTabs(): Agent[] {
     return this.activeWorkspaceId ? this.tabsOf(this.activeWorkspaceId) : [];
   }
+  /**
+   * The FOCUSED pane's agent — the target of ⌘D, keyboard focus, and the breadcrumb.
+   * Must be a leaf of the active tab; if the stored focus drifted outside it (e.g. the
+   * focused pane finished and left the tab), we fall back to the first visible pane.
+   */
   get activeAgent(): Agent | undefined {
-    const id = this.activeWorkspaceId ? this.activeAgentByWs[this.activeWorkspaceId] : null;
-    return this.agents.find(
-      (a) => a.id === id && !a.archived && this.effectiveLane(a) !== "done",
+    const wsId = this.activeWorkspaceId;
+    if (!wsId) return undefined;
+    const id = this.activeAgentByWs[wsId];
+    const a = this.agents.find(
+      (x) => x.id === id && !x.archived && this.effectiveLane(x) !== "done",
     );
+    const g = this.activeGroupId(wsId);
+    if (a && a.groupId === g) return a;
+    const vis = this.visibleAgentIds;
+    return vis.length ? this.agents.find((x) => x.id === vis[0]) : undefined;
   }
   /**
    * Agents whose terminals stay mounted. We deliberately KEEP kanban-done agents
@@ -519,6 +559,148 @@ class AppState {
   get mountedAgents(): Agent[] {
     const liveWs = new Set(this.liveWorkspaces.map((w) => w.id));
     return this.agents.filter((a) => !a.archived && liveWs.has(a.workspaceId));
+  }
+
+  // ---------- tabs & split layout ----------
+  //
+  // A "tab" is a GROUP of agents sharing a `groupId`, arranged in a split tree
+  // (see $lib/terminal/layout). tabsOf() lists the workspace's displayable agents;
+  // tabGroups() folds them into tabs. layoutFor() reconciles a tab's stored split
+  // tree against its current agents so the render never references a departed pane.
+
+  /** Displayable agents of one tab (group), in a stable order. */
+  agentsInGroup(groupId: string): Agent[] {
+    return this.agents
+      .filter(
+        (a) => a.groupId === groupId && !a.archived && this.effectiveLane(a) !== "done",
+      )
+      .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+  }
+
+  /** One entry per tab (group) in a workspace, ordered like the underlying tabs. */
+  tabGroups(workspaceId: string): { groupId: string; agents: Agent[]; order: number }[] {
+    const map = new Map<string, Agent[]>();
+    for (const a of this.tabsOf(workspaceId)) {
+      const list = map.get(a.groupId) ?? [];
+      list.push(a);
+      map.set(a.groupId, list);
+    }
+    return [...map.entries()]
+      .map(([groupId, agents]) => ({
+        groupId,
+        agents,
+        order: Math.min(...agents.map((a) => a.order)),
+      }))
+      .sort((x, y) => x.order - y.order);
+  }
+  get activeTabGroups(): { groupId: string; agents: Agent[]; order: number }[] {
+    return this.activeWorkspaceId ? this.tabGroups(this.activeWorkspaceId) : [];
+  }
+
+  /**
+   * The split tree to render for a tab, reconciled against the group's live agents:
+   * leaves for agents that left the tab are pruned, and any group agent missing from
+   * the stored tree is appended. Pure — does not persist. Null when the tab is empty.
+   */
+  layoutFor(groupId: string): LayoutNode | null {
+    const agents = this.agentsInGroup(groupId);
+    if (agents.length === 0) return null;
+    const ids = new Set(agents.map((a) => a.id));
+    let tree: LayoutNode | null = this.tabLayouts[groupId] ?? null;
+    if (tree) {
+      for (const lid of collectLeafIds(tree)) {
+        if (!ids.has(lid)) tree = tree ? removeLeaf(tree, lid) : null;
+      }
+    }
+    const present = new Set(tree ? collectLeafIds(tree) : []);
+    for (const a of agents) {
+      if (present.has(a.id)) continue;
+      tree = tree ? splitLeaf(tree, collectLeafIds(tree)[0], a.id, "row") : makeLeaf(a.id);
+      present.add(a.id);
+    }
+    return tree;
+  }
+
+  /** The active (on-screen) tab id for a workspace, self-healing if it went stale. */
+  activeGroupId(workspaceId: string): string | null {
+    const groups = this.tabGroups(workspaceId);
+    const stored = this.activeTabByWs[workspaceId];
+    if (stored && groups.some((g) => g.groupId === stored)) return stored;
+    const focusId = this.activeAgentByWs[workspaceId];
+    const focus = focusId ? this.agents.find((a) => a.id === focusId) : null;
+    if (focus && groups.some((g) => g.groupId === focus.groupId)) return focus.groupId;
+    return groups[0]?.groupId ?? null;
+  }
+  get activeGroup(): string | null {
+    return this.activeWorkspaceId ? this.activeGroupId(this.activeWorkspaceId) : null;
+  }
+
+  /** The split tree currently on screen (active tab of the active workspace). */
+  get visibleLayout(): LayoutNode | null {
+    const g = this.activeGroup;
+    return g ? this.layoutFor(g) : null;
+  }
+  /** Agent ids of every visible pane — the leaves of {@link visibleLayout}. */
+  get visibleAgentIds(): string[] {
+    const l = this.visibleLayout;
+    return l ? collectLeafIds(l) : [];
+  }
+
+  /** Switch to a tab (group) and focus one of its panes. */
+  setActiveTab(groupId: string) {
+    const agents = this.agentsInGroup(groupId);
+    if (!agents.length) return;
+    const wsId = agents[0].workspaceId;
+    const cur = this.activeAgentByWs[wsId];
+    const keep = cur && agents.some((a) => a.id === cur);
+    const tree = this.layoutFor(groupId);
+    const focus = keep ? cur! : (tree ? collectLeafIds(tree)[0] : agents[0].id);
+    this.activeTabByWs[wsId] = groupId;
+    this.setActiveAgent(focus);
+  }
+
+  /**
+   * Split the focused pane and launch a NEW Claude agent beside it (⌘D → "row",
+   * side-by-side; ⌘⇧D → "col", stacked). The new pane becomes the focus. With no
+   * focused pane it just opens a fresh tab.
+   */
+  splitFocused(dir: Dir) {
+    const focus = this.activeAgent;
+    if (!focus) {
+      this.newClaudeInActive();
+      return;
+    }
+    const groupId = focus.groupId;
+    // Base on the RECONCILED tree (includes any pane appended since the last save)
+    // so the new split lands exactly beside the focused pane.
+    const prev: LayoutNode = this.layoutFor(groupId) ?? makeLeaf(focus.id);
+    const created = this.addAgent({
+      workspaceId: focus.workspaceId,
+      kind: "claude",
+      run: "claude",
+      groupId,
+    });
+    this.tabLayouts = { ...this.tabLayouts, [groupId]: splitLeaf(prev, focus.id, created.id, dir) };
+    this.activeAgentByWs[focus.workspaceId] = created.id;
+    this.persist();
+  }
+
+  /** Flip the orientation (row⇄col) of the split holding the given pane. */
+  flipSplitOf(agentId: string) {
+    const a = this.agents.find((x) => x.id === agentId);
+    if (!a) return;
+    const tree = this.tabLayouts[a.groupId];
+    if (!tree) return;
+    this.tabLayouts = { ...this.tabLayouts, [a.groupId]: flipParent(tree, agentId) };
+    this.persist();
+  }
+
+  /** Drag-resize: move `deltaFrac` of a split's axis across gutter `index`. */
+  resizePane(groupId: string, path: number[], index: number, deltaFrac: number) {
+    const tree = this.tabLayouts[groupId];
+    if (!tree) return;
+    this.tabLayouts = { ...this.tabLayouts, [groupId]: resizeAt(tree, path, index, deltaFrac) };
+    this.persist();
   }
   /**
    * The agent roster for a workspace (the sidebar's bottom section). Ordered STRICTLY
@@ -631,14 +813,16 @@ class AppState {
     if (!this.activeAgentByWs[id]) {
       this.activeAgentByWs[id] = this.tabsOf(id)[0]?.id ?? null;
     }
+    // Keep the on-screen tab in sync with the active agent.
+    const activeId = this.activeAgentByWs[id];
+    const active = activeId ? this.agents.find((x) => x.id === activeId) : null;
+    this.activeTabByWs[id] = active?.groupId ?? this.tabGroups(id)[0]?.groupId ?? null;
     // Switching into a workspace is an explicit user action → auto-resume its
     // active agent (unlike a fresh app launch, which restores state via load()
     // and leaves every agent dormant until clicked).
-    const activeId = this.activeAgentByWs[id];
-    if (activeId) {
-      this.launchedAgentIds.add(activeId);
-      const a = this.agents.find((x) => x.id === activeId);
-      if (a) a.lastUsedAt = Date.now(); // opened → clear of the idle-reaper
+    if (active) {
+      this.launchedAgentIds.add(active.id);
+      active.lastUsedAt = Date.now(); // opened → clear of the idle-reaper
     }
   }
 
@@ -710,11 +894,15 @@ class AppState {
     run: string | null;
     cwd?: string | null;
     initialPrompt?: string | null;
+    /** Join an existing tab (split pane); defaults to a fresh singleton group. */
+    groupId?: string;
   }): Agent {
     const siblings = this.agents.filter((a) => a.workspaceId === input.workspaceId);
+    const id = uid("agent");
     const agent: Agent = {
-      id: uid("agent"),
+      id,
       workspaceId: input.workspaceId,
+      groupId: input.groupId ?? id,
       name: input.name?.trim() || this.nextAgentName(input.workspaceId, input.kind),
       kind: input.kind,
       run: input.run,
@@ -740,6 +928,8 @@ class AppState {
     this.agents.push(agent);
     this.activeWorkspaceId = input.workspaceId;
     this.activeAgentByWs[input.workspaceId] = agent.id;
+    // Focus the tab this agent lives in (its own group unless it joined a split).
+    this.activeTabByWs[input.workspaceId] = agent.groupId;
     // A freshly created agent is one the user just opened — launch it now (so a
     // task-seeded prompt starts working immediately). Creation is always explicit.
     this.launchedAgentIds.add(agent.id);
@@ -765,6 +955,8 @@ class AppState {
     a.lastUsedAt = Date.now();
     this.activeWorkspaceId = a.workspaceId;
     this.activeAgentByWs[a.workspaceId] = id;
+    // Focusing a pane also selects the tab it lives in.
+    this.activeTabByWs[a.workspaceId] = a.groupId;
     // Selecting an agent (tab / roster click, tab-index shortcut, open-from-page,
     // reopen, restore-from-history) is an explicit user open → allow its PTY to
     // start. Distinct from the fresh-launch restore in load(), which never lands
@@ -852,8 +1044,8 @@ class AppState {
 
   /** Switch to the nth (1-based) tab of the active workspace (Cmd+1..9). */
   activateTabIndex(n: number) {
-    const tab = this.activeTabs[n - 1];
-    if (tab) this.setActiveAgent(tab.id);
+    const g = this.activeTabGroups[n - 1];
+    if (g) this.setActiveTab(g.groupId);
   }
 
   setAgentLane(id: string, lane: TaskStatus) {
@@ -892,14 +1084,71 @@ class AppState {
     const a = this.agents.find((x) => x.id === id);
     if (!a) return;
     const ws = a.workspaceId;
+    const groupId = a.groupId;
+    const wasActive = this.activeAgentByWs[ws] === id;
     this.lastClosedAgentId = id; // Track for undo/reopen
     this.launchedAgentIds.delete(id);
     this.agents = this.agents.filter((x) => x.id !== id);
     // Intentionally leave dangling ids in task.agentIds[] (same soft-ref convention as ActivityEntry.refId);
     // taskAgents() filters live agents only, so this id is naturally dropped from current views.
-    if (this.activeAgentByWs[ws] === id) {
-      this.activeAgentByWs[ws] = this.tabsOf(ws)[0]?.id ?? null;
+
+    // Drop the closed pane from its tab's split tree (collapsing the split if it's
+    // now single-child). If the tab is empty, forget its layout entirely.
+    const tree = this.tabLayouts[groupId];
+    if (tree) {
+      const pruned = removeLeaf(tree, id);
+      const next = { ...this.tabLayouts };
+      if (pruned) next[groupId] = pruned;
+      else delete next[groupId];
+      this.tabLayouts = next;
     }
+
+    if (wasActive) {
+      // Prefer a sibling pane in the same tab; otherwise fall to another tab.
+      const siblings = this.agentsInGroup(groupId);
+      if (siblings.length) {
+        this.activeAgentByWs[ws] = siblings[0].id;
+        this.activeTabByWs[ws] = groupId;
+      } else {
+        const g = this.tabGroups(ws)[0];
+        this.activeAgentByWs[ws] = g?.agents[0]?.id ?? null;
+        this.activeTabByWs[ws] = g?.groupId ?? null;
+      }
+    }
+    this.persist();
+  }
+
+  /**
+   * Close a whole tab — every live pane in the group. Scoped to displayable agents
+   * so a sibling that has moved to the Done lane (and now lives in History) is left
+   * intact rather than being permanently deleted along with the tab.
+   */
+  closeTab(groupId: string) {
+    const ids = this.agentsInGroup(groupId).map((a) => a.id);
+    for (const id of ids) this.removeAgent(id);
+  }
+
+  /** Move every pane of a tab to a kanban lane — the tab moves as one unit. */
+  setGroupLane(groupId: string, lane: TaskStatus) {
+    for (const a of this.agentsInGroup(groupId)) this.setAgentLane(a.id, lane);
+  }
+
+  /**
+   * Reorder a whole tab (group) to an absolute slot among the workspace's other
+   * tabs. Rewrites member `order`s so each tab stays a contiguous block, keeping the
+   * grouping stable across reloads. Idempotent — safe to call each drag frame.
+   */
+  moveTabToIndex(groupId: string, index: number) {
+    const ws = this.agentsInGroup(groupId)[0]?.workspaceId;
+    if (!ws) return;
+    const groups = this.tabGroups(ws);
+    const from = groups.findIndex((g) => g.groupId === groupId);
+    if (from === -1) return;
+    const [moved] = groups.splice(from, 1);
+    const at = Math.max(0, Math.min(index, groups.length));
+    groups.splice(at, 0, moved);
+    let o = 0;
+    for (const g of groups) for (const a of g.agents) a.order = o++;
     this.persist();
   }
 
@@ -1440,12 +1689,11 @@ class AppState {
    */
   private reapIdleAgents() {
     const now = Date.now();
-    // The agent currently on screen = the active agent of the active workspace.
-    const onScreenId = this.activeWorkspaceId
-      ? this.activeAgentByWs[this.activeWorkspaceId]
-      : null;
+    // Agents currently on screen = every visible pane of the active tab (all of a
+    // split grid, not just the focused one) — never sleep any of them.
+    const onScreen = new Set(this.visibleAgentIds);
     for (const a of this.agents) {
-      if (a.id === onScreenId) continue; // never sleep what the user has open
+      if (onScreen.has(a.id)) continue; // never sleep what the user has open
       if (!this.launchedAgentIds.has(a.id)) continue; // no live PTY to reclaim
       if (a.kind !== "claude") continue; // only Claude sessions resume losslessly
       if (a.state !== "idle" && a.state !== "done") continue; // don't interrupt work
@@ -1687,6 +1935,7 @@ class AppState {
       agents: this.agents.map((a) => ({
         id: a.id,
         workspaceId: a.workspaceId,
+        groupId: a.groupId,
         name: a.name,
         kind: a.kind,
         run: a.run,
@@ -1710,6 +1959,8 @@ class AppState {
       activityLog: this.activityLog,
       activeWorkspaceId: this.activeWorkspaceId,
       activeAgentByWs: this.activeAgentByWs,
+      activeTabByWs: this.activeTabByWs,
+      tabLayouts: this.tabLayouts,
       defaultProjects: this.defaultProjects,
       terminalScrollPos: this.terminalScrollPos,
       shortcuts: this.shortcuts,
@@ -1765,6 +2016,8 @@ class AppState {
           const { task: legacyTask, ...rest } = a;
           return {
             ...rest,
+            // Legacy agents predate tabs → each becomes its own singleton tab.
+            groupId: a.groupId ?? a.id,
             // Keep agents in lock-step with their workspace's archived state.
             archived: (a.archived ?? false) || archivedWs.has(a.workspaceId),
             // Migrate: task -> lane, add taskId
@@ -1866,6 +2119,11 @@ class AppState {
         this.activeWorkspaceId =
           data.activeWorkspaceId ?? this.liveWorkspaces[0]?.id ?? null;
         this.activeAgentByWs = data.activeAgentByWs ?? {};
+        this.activeTabByWs = data.activeTabByWs ?? {};
+        // Restore per-tab split layouts, dropping any that reference an agent that
+        // no longer exists (self-healed further by layoutFor at render time).
+        this.tabLayouts =
+          data.tabLayouts && typeof data.tabLayouts === "object" ? data.tabLayouts : {};
         this.defaultProjects = Array.isArray(data.defaultProjects) ? data.defaultProjects : [];
         this.terminalScrollPos = typeof data.terminalScrollPos === "number" ? data.terminalScrollPos : 0;
         // Load shortcuts with merge of defaults to catch new/updated shortcuts
@@ -1910,10 +2168,15 @@ class AppState {
           normalizeOrder(list, (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
         }
 
-        // Ensure every workspace has a valid active agent.
+        // Ensure every workspace has a valid active agent and on-screen tab.
         for (const w of this.workspaces) {
           if (!this.activeAgentByWs[w.id]) {
             this.activeAgentByWs[w.id] = this.tabsOf(w.id)[0]?.id ?? null;
+          }
+          const focusId = this.activeAgentByWs[w.id];
+          const focus = focusId ? this.agents.find((a) => a.id === focusId) : null;
+          if (!this.activeTabByWs[w.id]) {
+            this.activeTabByWs[w.id] = focus?.groupId ?? this.tabGroups(w.id)[0]?.groupId ?? null;
           }
         }
         // Keep counter ahead of restored ids to avoid collisions.

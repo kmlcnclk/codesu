@@ -295,7 +295,7 @@
         {@const meta = STATE_META[agent.state]}
         {@const taskMeta = TASK_META[app.effectiveLane(agent)]}
         {@const editing = editingAgentId === agent.id}
-        {@const tabNo = app.activeTabs.findIndex((t) => t.id === agent.id) + 1}
+        {@const tabNo = app.activeTabGroups.findIndex((g) => g.groupId === agent.groupId) + 1}
         <!-- Row colour: live state (working=blue / done=green / blocked=red)
              overrides the kanban task colour; otherwise (idle/exited) the task
              status colour is shown. Backlog is the neutral default → no accent. -->
