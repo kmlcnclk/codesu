@@ -1,7 +1,8 @@
 /**
  * Tiny, dependency-free Markdown support for Notes & Tasks.
  *   • renderMarkdown() — a minimal, SAFE block+inline renderer (input is HTML-escaped
- *     first, so `{@html}` output can't inject tags).
+ *     first and link schemes are allowlisted, so `{@html}` output can't inject tags,
+ *     attributes or `javascript:` navigations — see the invariant on escapeHtml).
  *   • applyMdFormat() — pure textarea transform for the formatting toolbar.
  *   • stripMarkdown() — flatten to plain text for list snippets.
  *
@@ -9,8 +10,46 @@
  * code, lists, quotes, links, rules) which is what a notes/tasks tool needs.
  */
 
+/**
+ * SECURITY INVARIANT — do not weaken either half of this.
+ *
+ *   1. QUOTES ARE ESCAPED. The output of this module goes through `{@html}`, and the
+ *      inline rules below drop captured text into a double-quoted `href` attribute.
+ *      Escaping only `& < >` lets `[x]("/onmouseover="…)` close that attribute and
+ *      add handlers of its own — and in a Tauri webview an injected handler can
+ *      `invoke("start_pty", …)`, i.e. run arbitrary local programs. Tag-escaping alone
+ *      is NOT enough; the quotes are what keep an attribute an attribute.
+ *   2. HREF SCHEMES ARE ALLOWLISTED ({@link isSafeHref}). Escaping cannot stop
+ *      `[x](javascript:alert(1))`, which needs no quotes at all.
+ */
 function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** Schemes an anchor may carry. Anything else is rendered as plain text, not a link. */
+const SAFE_SCHEMES = ["http", "https", "mailto"];
+
+/**
+ * May this URL become an `href`? Called with ALREADY-ESCAPED text, which is why the
+ * entities escapeHtml produces (`&amp; &lt; &gt; &quot; &#39;`) are deliberately left
+ * alone: none of them decodes to a `:` or to a scheme letter, so none can conjure a
+ * scheme that isn't visible here.
+ *
+ * A URL with no scheme at all (a relative path, `#anchor`, `?query`) is allowed — it
+ * can only ever point back at the app itself.
+ */
+function isSafeHref(url: string): boolean {
+  // Control characters are dropped by URL parsers before the scheme is read, so
+  // "java\x01script:alert(1)" navigates as javascript: — strip them first.
+  // eslint-disable-next-line no-control-regex
+  const u = url.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(u);
+  return !scheme || SAFE_SCHEMES.includes(scheme[1].toLowerCase());
 }
 
 /** Inline spans. Operates on already-escaped text. */
@@ -22,13 +61,21 @@ function inline(s: string): string {
     .replace(/~~([^~]+)~~/g, "<del>$1</del>")
     .replace(/(^|[^*])\*(?!\s)([^*\n]+?)\*/g, "$1<em>$2</em>")
     .replace(/(^|[^_])_(?!\s)([^_\n]+?)_/g, "$1<em>$2</em>")
-    .replace(
-      /\[([^\]]+)\]\(([^)\s]+)\)/g,
-      '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label: string, url: string) =>
+      isSafeHref(url)
+        ? `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`
+        : m, // unusable scheme: leave the source text, escaped, exactly as written
     );
 }
 
-const BLOCK_START = /^(#{1,6}\s|>\s?|```|\s*[-*+]\s|\s*\d+\.\s)/;
+/**
+ * The blockquote marker as it looks *after* escapeHtml: `>` has already become
+ * `&gt;` by the time any block rule runs, so matching a bare `>` here silently
+ * never fires and quotes fall through to `<p>&gt; …</p>`.
+ */
+const QUOTE_MARKER = /^&gt;\s?/;
+
+const BLOCK_START = /^(#{1,6}\s|&gt;\s?|```|\s*[-*+]\s|\s*\d+\.\s)/;
 
 export function renderMarkdown(src: string): string {
   if (!src || !src.trim()) return "";
@@ -88,9 +135,9 @@ export function renderMarkdown(src: string): string {
       continue;
     }
 
-    if (/^>\s?/.test(line)) {
+    if (QUOTE_MARKER.test(line)) {
       closeList();
-      out.push(`<blockquote>${inline(line.replace(/^>\s?/, ""))}</blockquote>`);
+      out.push(`<blockquote>${inline(line.replace(QUOTE_MARKER, ""))}</blockquote>`);
       i++;
       continue;
     }

@@ -12,6 +12,21 @@
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") onClose();
   }
+
+  /**
+   * Keys pressed INSIDE the dialog. The propagation stop is the modal's shield: it keeps
+   * ordinary typing (in an autofocused input, say) from reaching the app's global
+   * shortcut handler. But it also kept Escape from ever reaching {@link onKey} on
+   * `<svelte:window>`, so a focused field made Escape do nothing at all — Escape is
+   * therefore answered here, before the shield goes up.
+   */
+  function onDialogKey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    }
+    e.stopPropagation();
+  }
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -26,7 +41,7 @@
     aria-label={title}
     tabindex="-1"
     onclick={(e) => e.stopPropagation()}
-    onkeydown={(e) => e.stopPropagation()}
+    onkeydown={onDialogKey}
   >
     <header class="head">
       <h3>{title}</h3>

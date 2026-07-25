@@ -56,6 +56,11 @@
     // Attach keyboard handler
     window.addEventListener("keydown", onKeydown);
 
+    // Re-stat the workspace folders whenever the app regains focus, so a folder
+    // deleted (or restored) while the user was elsewhere is flagged/cleared right
+    // away rather than only when an agent refuses to launch.
+    window.addEventListener("focus", recheckPaths);
+
     const un = listen<{ id: string; code: number | null }>("session-exited", (e) => {
       app.markExited(e.payload.id, e.payload.code);
     });
@@ -68,14 +73,51 @@
     syncFullscreen();
     const unResize = win.onResized(syncFullscreen);
 
+    // Write any state still sitting inside persist()'s 250ms debounce before the
+    // window goes away. Tauri awaits this handler and only then destroys the window
+    // (it closes normally — we never preventDefault), so a reorder, selection or
+    // review made in that last fraction of a second is no longer lost on quit.
+    const unClose = win.onCloseRequested(async () => {
+      await app.flush();
+    });
+
     return () => {
       window.removeEventListener("keydown", onKeydown);
+      window.removeEventListener("focus", recheckPaths);
       un.then((f) => f());
       unResize.then((f) => f()).catch(() => {});
+      unClose.then((f) => f()).catch(() => {});
     };
   });
 
+  // Hoisted (function declaration, like onKeydown) so the listener above can name it
+  // for both add and remove.
+  function recheckPaths() {
+    void app.checkWorkspacePaths();
+  }
+
+  /**
+   * True when the keystroke is being typed into a text field, where app shortcuts must
+   * not fire: ⌘A in a note body means "select all", not "go to Agents", and the note
+   * editor / search / title inputs don't stop propagation. Self-sufficient by design —
+   * it does not rely on any component (modals included) swallowing the event first.
+   *
+   * The terminal is the one deliberate exception. xterm types through a hidden
+   * <textarea>, but ⌘T / ⌘D / ⌘1-9 / ⌘⌫ are exactly the shortcuts the user needs WHILE
+   * working in a pane, and Claude itself only ever binds ctrl chords — so keys landing
+   * anywhere inside an .xterm root stay global.
+   */
+  function isEditableTarget(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el || typeof el.closest !== "function") return false;
+    if (el.closest(".xterm")) return false;
+    return !!el.closest(
+      "input, textarea, select, [contenteditable]:not([contenteditable='false'])",
+    );
+  }
+
   function onKeydown(e: KeyboardEvent) {
+    if (isEditableTarget(e.target)) return;
     const key = e.key.toLowerCase();
     const shortcuts = app.getShortcutsByContext(view as any);
 

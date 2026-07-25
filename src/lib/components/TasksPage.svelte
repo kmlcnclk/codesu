@@ -89,10 +89,13 @@
       }
     }
 
-    // Reindex the destination lane so order reflects the new position.
+    // Reindex the destination lane so the board order reflects the new position.
+    // This writes `laneOrder`, the kanban's OWN key — NOT `order`, which is the tab
+    // order in the Agents view: rewriting that made a card drag here silently
+    // reshuffle the user's tabs over there.
     const laneAgents = (agentsByLane[toLane] || []).filter((a) => a.id !== agentId);
     laneAgents.splice(Math.min(toIndex, laneAgents.length), 0, agent);
-    for (let i = 0; i < laneAgents.length; i++) laneAgents[i].order = i;
+    for (let i = 0; i < laneAgents.length; i++) laneAgents[i].laneOrder = i;
     app.persist();
   }
 
@@ -134,13 +137,17 @@
       }
     }
 
-    // Sort each lane's agents by order field (single pass). This list spans all
-    // workspaces, where `order` is only unique *within* a workspace, so two agents
-    // from different workspaces can share an order — tie-break on createdAt (then id)
-    // to keep the arrangement deterministic and stable across app restarts.
+    // Sort each lane's agents by the board's own `laneOrder` (single pass), falling
+    // back to `order` for cards never dragged here — so a board that predates
+    // laneOrder keeps exactly the arrangement it had. This list spans all workspaces,
+    // where neither key is unique *across* workspaces, so tie-break on createdAt (then
+    // id) to keep it deterministic and stable across app restarts.
     Object.keys(grouped).forEach((lane) => {
       grouped[lane].sort(
-        (a, b) => a.order - b.order || a.createdAt - b.createdAt || a.id.localeCompare(b.id),
+        (a, b) =>
+          (a.laneOrder ?? a.order) - (b.laneOrder ?? b.order) ||
+          a.createdAt - b.createdAt ||
+          a.id.localeCompare(b.id),
       );
     });
 

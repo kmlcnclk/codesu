@@ -210,11 +210,14 @@
     <ul class="list ws-list">
       {#each app.liveWorkspaces as ws (ws.id)}
         {@const editing = editingWsId === ws.id}
+        {@const missing = app.isPathMissing(ws.path)}
         <li animate:flip={{ duration: 160 }}>
           <button
             class="ws"
             class:active={ws.id === app.activeWorkspaceId}
+            class:missing
             class:dragging={wsDragId === ws.id && wsDragMoved}
+            title={missing ? `Folder not found: ${ws.path}` : undefined}
             data-id={ws.id}
             style="--accent:{ws.color}"
             onpointerdown={(e) => wsPointerDown(e, ws)}
@@ -226,7 +229,11 @@
             oncontextmenu={(e) => wsMenu(e, ws)}
           >
             <span class="bar"></span>
-            <span class="ws-icon"><Icon name={ws.isWorktree ? "branch" : "folder"} size={14} /></span>
+            <!-- A missing folder replaces the folder/branch glyph: its agents cannot be
+                 launched at all, so it needs to read as broken at a glance. -->
+            <span class="ws-icon">
+              <Icon name={missing ? "alert" : ws.isWorktree ? "branch" : "folder"} size={14} />
+            </span>
             <span class="ws-label">
               {#if editing}
                 <input
@@ -244,7 +251,9 @@
                 />
               {:else}
                 <span class="ws-name">{ws.name}</span>
-                <span class="ws-sub">{ws.branch ?? ws.path.split("/").slice(-1)[0]}</span>
+                <span class="ws-sub">
+                  {missing ? "folder missing" : (ws.branch ?? ws.path.split("/").slice(-1)[0])}
+                </span>
               {/if}
             </span>
             {#if !editing}
@@ -569,6 +578,15 @@
     width: 16px;
     height: 16px;
     flex-shrink: 0;
+  }
+  /* Workspace whose folder is gone from disk — its agents can't be launched at all,
+     so the row is dimmed and both the glyph and the subtitle turn to a warning. */
+  .ws.missing {
+    opacity: 0.72;
+  }
+  .ws.missing .ws-icon,
+  .ws.missing .ws-sub {
+    color: var(--danger, #ff6b6b);
   }
   .ws-label {
     display: flex;

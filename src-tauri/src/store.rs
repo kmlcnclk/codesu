@@ -20,6 +20,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
@@ -44,6 +45,22 @@ fn state_dir(app: &AppHandle) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
+
+/// Narrow a state file to owner-only (0600).
+///
+/// The blob is opaque to us but it carries whatever the user typed into an agent's notes,
+/// which in practice includes pasted tokens and credentials. `fs::File::create` and
+/// `fs::copy` both leave 0644 behind, i.e. readable by every account on the machine, so
+/// every file this module creates is narrowed as soon as it exists.
+#[cfg(unix)]
+fn set_private(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+}
+
+/// No unix mode bits to set; the OS default ACL applies.
+#[cfg(not(unix))]
+fn set_private(_path: &Path) {}
 
 /// Parse a state file into JSON, treating an empty file as "no state".
 fn parse_state(path: &Path) -> Result<Value, String> {
@@ -93,9 +110,13 @@ fn migrate_legacy_dir(new_dir: &Path, legacy_dir: &Path) -> Result<(), String> {
     }
     fs::create_dir_all(new_dir).map_err(|e| e.to_string())?;
     fs::copy(&legacy, &new_path).map_err(|e| e.to_string())?;
+    set_private(&new_path);
     let legacy_bak = legacy_dir.join(BAK_FILE);
     if legacy_bak.exists() {
-        let _ = fs::copy(&legacy_bak, new_dir.join(BAK_FILE));
+        let new_bak = new_dir.join(BAK_FILE);
+        if fs::copy(&legacy_bak, &new_bak).is_ok() {
+            set_private(&new_bak);
+        }
     }
     Ok(())
 }
@@ -115,14 +136,19 @@ fn load_from_dir(dir: &Path) -> Result<Value, String> {
                     if let Ok(value) = parse_state(&bak) {
                         // Quarantine the corrupt live file (don't destroy it) and
                         // reinstate the good backup so the next save rotates cleanly.
-                        let _ = fs::rename(&path, dir.join(CORRUPT_FILE));
+                        let corrupt = dir.join(CORRUPT_FILE);
+                        let _ = fs::rename(&path, &corrupt);
+                        set_private(&corrupt);
                         let _ = fs::copy(&bak, &path);
+                        set_private(&path);
                         return Ok(value);
                     }
                 }
                 // No usable backup: keep the raw bytes for manual recovery and start
                 // fresh rather than letting the frontend overwrite them with empty state.
-                let _ = fs::rename(&path, dir.join(CORRUPT_FILE));
+                let corrupt = dir.join(CORRUPT_FILE);
+                let _ = fs::rename(&path, &corrupt);
+                set_private(&corrupt);
                 return Err(format!(
                     "state.json was corrupt (preserved as state.corrupt.json): {primary_err}"
                 ));
@@ -134,6 +160,7 @@ fn load_from_dir(dir: &Path) -> Result<Value, String> {
     if bak.exists() {
         if let Ok(value) = parse_state(&bak) {
             let _ = fs::copy(&bak, &path);
+            set_private(&path);
             return Ok(value);
         }
     }
@@ -141,18 +168,38 @@ fn load_from_dir(dir: &Path) -> Result<Value, String> {
     Ok(Value::Null)
 }
 
+/// Serialises the whole write sequence below.
+///
+/// Saves are debounced and arrive on Tauri's sync command path, so today they are already
+/// one-at-a-time on the main thread — but that is an accident of how the commands are
+/// declared, not a guarantee, and the sequence uses one fixed scratch name. Two concurrent
+/// saves sharing `state.json.tmp` would interleave their writes and rename each other's
+/// half-written file into place. A mutex is cheap insurance against that ever becoming
+/// true (an async command, a background flush).
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
 /// Persist `state` into `dir` atomically, keeping the previous good copy as the
 /// backup. Order: write temp → fsync → snapshot current file to `.bak` → rename.
 fn save_to_dir(dir: &Path, state: &Value) -> Result<(), String> {
+    // A panicking save would poison this; the data is not what the lock protects, so a
+    // poisoned lock is simply taken over rather than turned into a failure to save.
+    let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let path = dir.join(STATE_FILE);
     let tmp = dir.join(TMP_FILE);
-    let text = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
+    // Compact, not pretty: this runs on a 250ms debounce behind every state change and
+    // serialises the whole snapshot (workspaces, agents, tasks, months of activity), so
+    // the indentation is pure write amplification on a hot path. Nothing reads the file
+    // by hand — it is machine state, and load_from_dir parses either form.
+    let text = serde_json::to_string(state).map_err(|e| e.to_string())?;
 
     // Write the new state to a temp file and flush it all the way to disk before we
     // touch the live file, so a crash mid-write can never leave a truncated state.json.
     {
         let mut f = fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        // Narrowed BEFORE the bytes land, so the notes are never briefly world-readable.
+        set_private(&tmp);
         f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
         // Best-effort durability; the atomic rename below is the real guarantee.
         let _ = f.sync_all();
@@ -160,8 +207,12 @@ fn save_to_dir(dir: &Path, state: &Value) -> Result<(), String> {
     // Snapshot the current (last-known-good) file into the backup before swapping.
     // A failed backup must not block the save, so it is best-effort.
     if path.exists() {
-        let _ = fs::copy(&path, dir.join(BAK_FILE));
+        let bak = dir.join(BAK_FILE);
+        if fs::copy(&path, &bak).is_ok() {
+            set_private(&bak);
+        }
     }
+    // The rename carries the temp file's 0600 over to `state.json`.
     fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -181,10 +232,27 @@ pub fn save(app: &AppHandle, state: Value) -> Result<(), String> {
     save_to_dir(&dir, &state)
 }
 
+/// Whether `session_id` is a plain UUID-shaped token — ASCII alphanumerics and dashes,
+/// nothing else.
+///
+/// The id is interpolated into a filename, so anything looser turns this into a
+/// path-existence oracle for the webview: `../../.ssh/id_rsa` (or a bare `.` slipping a
+/// second extension in) would report on files that have nothing to do with Claude Code.
+/// Real session ids are UUIDs, so the check costs nothing.
+fn is_safe_session_id(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
 /// Whether Claude Code has a persisted conversation for `session_id`.
 /// Sessions live at `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`.
 /// Used to choose `--resume` (exists) vs `--session-id` (create) with no error flash.
 pub fn claude_session_exists(session_id: &str) -> bool {
+    if !is_safe_session_id(session_id) {
+        return false;
+    }
     let Ok(home) = std::env::var("HOME") else {
         return false;
     };
@@ -266,7 +334,10 @@ mod tests {
         save_to_dir(dir.path(), &v2).unwrap();
         // Live file holds the newest; backup holds the previous good copy.
         assert_eq!(load_from_dir(dir.path()).unwrap(), v2);
-        assert!(read(dir.path().join(BAK_FILE)).contains("\"n\": 1"));
+        // Compare parsed, not raw text, so the assertion survives a serialiser format change.
+        let backup: serde_json::Value =
+            serde_json::from_str(&read(dir.path().join(BAK_FILE))).unwrap();
+        assert_eq!(backup, v1);
     }
 
     #[test]
@@ -378,6 +449,27 @@ mod tests {
 
         // Legacy data is pulled in over the empty tree.
         assert_eq!(load_from_dir(&new_dir).unwrap(), legacy_data);
+    }
+
+    /// The id lands in a filename, so anything that could steer the lookup out of
+    /// `~/.claude/projects` turns the command into a path-existence oracle for the webview.
+    #[test]
+    fn only_uuid_shaped_session_ids_are_looked_up() {
+        assert!(is_safe_session_id("3f2a1b4c-5d6e-7f80-91a2-b3c4d5e6f708"));
+        assert!(is_safe_session_id("abc123"));
+        for bad in [
+            "",
+            "../../.ssh/id_rsa",
+            "a/b",
+            "a\\b",
+            "..",
+            "id.jsonl",     // a dot would let a second extension through
+            "id\0",         // NUL truncates the path at the syscall boundary
+            "id with space",
+        ] {
+            assert!(!is_safe_session_id(bad), "{bad:?} must be rejected");
+            assert!(!claude_session_exists(bad));
+        }
     }
 
     #[test]
