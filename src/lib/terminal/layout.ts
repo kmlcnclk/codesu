@@ -153,6 +153,14 @@ export function flipParent(root: LayoutNode, agentId: string): LayoutNode {
  * Transfer `deltaFrac` (fraction of the split's own axis extent) from the child
  * after gutter `index` to the child before it, clamped so neither drops below
  * {@link MIN_PANE}. Returns a new root. Used by divider drags.
+ *
+ * A pane can legitimately already BE under {@link MIN_PANE} — {@link splitLeaf} halves
+ * the target's slot, so four same-axis splits leave a child at 0.0625 — and the clamp
+ * must stay a clamp there rather than become a shove. Both bounds are therefore taken
+ * against 0, which keeps `0` (leave it alone) inside the allowed range no matter how
+ * small the panes are. Bounding naively (`max(d, MIN_PANE - a)` then `min(d, b - MIN)`)
+ * inverts the drag instead: with `a = b = 0.05` a `+0.01` pull resolves to `-0.05`,
+ * driving the divider the wrong way and collapsing `a` to an invisible zero.
  */
 export function resizeAt(root: LayoutNode, path: number[], index: number, deltaFrac: number): LayoutNode {
   const clone = cloneNode(root);
@@ -161,9 +169,9 @@ export function resizeAt(root: LayoutNode, path: number[], index: number, deltaF
   const a = node.sizes[index];
   const b = node.sizes[index + 1];
   if (a == null || b == null) return clone;
-  let d = deltaFrac;
-  d = Math.max(d, MIN_PANE - a); // don't shrink a below min
-  d = Math.min(d, b - MIN_PANE); // don't shrink b below min
+  const lo = Math.min(0, MIN_PANE - a); // shrink a, but never past min (0 if already under)
+  const hi = Math.max(0, b - MIN_PANE); // shrink b, but never past min (0 if already under)
+  const d = Math.max(lo, Math.min(deltaFrac, hi));
   node.sizes[index] = a + d;
   node.sizes[index + 1] = b - d;
   return clone;

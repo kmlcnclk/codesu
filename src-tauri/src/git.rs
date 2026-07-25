@@ -104,9 +104,13 @@ pub fn create_worktree(
     }
     let path_str = path.to_string_lossy().to_string();
 
+    // `--` before the positionals: without it a path or base ref that happens to start
+    // with a dash (`--lock`, `-f`) is parsed as an option to `worktree add` instead of as
+    // a value. `-b <branch>` is already safe — parse-options takes the following argv as
+    // the option's value verbatim.
     git(
         repo,
-        &["worktree", "add", "--track", "-b", branch, &path_str, &base],
+        &["worktree", "add", "--track", "-b", branch, "--", &path_str, &base],
     )?;
 
     // Return the freshly-created entry.
@@ -161,10 +165,11 @@ pub fn remove_worktree(
     delete_branch: Option<String>,
 ) -> Result<(), String> {
     ensure_repo(repo)?;
-    git(repo, &["worktree", "remove", "--force", worktree_path])?;
+    // See `create_worktree`: `--` keeps a dash-leading path or branch name a positional.
+    git(repo, &["worktree", "remove", "--force", "--", worktree_path])?;
     if let Some(branch) = delete_branch.filter(|b| !b.is_empty()) {
         // Branch isn't auto-deleted with the worktree; ignore failure (may be checked out elsewhere).
-        let _ = git(repo, &["branch", "-D", &branch]);
+        let _ = git(repo, &["branch", "-D", "--", &branch]);
     }
     let _ = git(repo, &["worktree", "prune"]);
     Ok(())

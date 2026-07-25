@@ -4,11 +4,6 @@
   import Icon from "./Icon.svelte";
   import { computeLayout, GUTTER_PX, type Gutter } from "$lib/terminal/layout";
 
-  function cwdFor(workspaceId: string, agentCwd: string | null): string | null {
-    if (agentCwd) return agentCwd;
-    return app.workspaces.find((w) => w.id === workspaceId)?.path ?? null;
-  }
-
   let areaEl: HTMLDivElement;
 
   // The on-screen tab's panes (as fractional rects) and its draggable dividers.
@@ -83,7 +78,8 @@
         rect={rects[agent.id]}
         visible={!!rects[agent.id]}
         focused={agent.id === app.activeAgent?.id}
-        cwd={cwdFor(agent.workspaceId, agent.cwd)}
+        showHeader={app.agentsInGroup(agent.groupId).length > 1}
+        cwd={app.cwdOf(agent)}
       />
     {/each}
 
@@ -131,10 +127,13 @@
   .gutter.col {
     cursor: row-resize;
   }
+  /* The rounded pane cards + their gap already separate the panes, so the seam
+     line stays invisible at rest and only lights up (accent) while hovering the
+     draggable divider. */
   .gutter::after {
     content: "";
     position: absolute;
-    background: var(--border);
+    background: transparent;
     transition: background 0.12s ease;
   }
   .gutter.row::after {

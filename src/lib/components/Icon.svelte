@@ -43,6 +43,8 @@
       "<path d='M4 6a2 2 0 0 1 2-2h3.2a2 2 0 0 1 1.4.6L12.2 6H18a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z'/>",
     branch:
       "<circle cx='6' cy='6' r='2.2'/><circle cx='6' cy='18' r='2.2'/><circle cx='18' cy='8' r='2.2'/><path d='M6 8.2v7.6'/><path d='M18 10.2a6 6 0 0 1-6 6H9'/>",
+    alert:
+      "<path d='M10.3 4 1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0Z'/><path d='M12 9.5v4'/><path d='M12 17.2h.01'/>",
     clipboard:
       "<rect x='5' y='4' width='14' height='17' rx='2'/><path d='M9 4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V5H9Z'/><path d='M9 13l2 2 4-4'/>",
     inbox:

@@ -1,10 +1,19 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { readScreenSignal, readSelectList, selectOptionAtRow } from "./claudeScreen";
 
 export interface TerminalHandle {
   /** Refit the terminal to its container (call after showing a hidden terminal). */
   fit: () => void;
   /** Focus the terminal. */
   focus: () => void;
+  /**
+   * Plain text of the bottom `maxRows` rows of the LIVE screen, read straight out of
+   * xterm's own buffer. This is what the terminal is actually displaying right now —
+   * not a guess reassembled from the raw byte stream — which is what the activity
+   * monitor reads Claude's status line / prompt dialogs from. Always measured from
+   * `baseY`, so the user scrolling back never changes the result.
+   */
+  screen: (maxRows?: number) => string;
   /** Get current scroll position (buffer line where viewport top is). */
   getScrollPosition: () => number;
   /** Set scroll position (buffer line to scroll to). */
@@ -20,8 +29,18 @@ export interface TerminalOptions {
   cwd?: string | null;
   /** Optional command auto-run in the shell (e.g. "claude"). */
   run?: string | null;
-  /** Called with each decoded chunk of PTY output (for the activity monitor). */
-  onOutput?: (text: string) => void;
+  /**
+   * Environment overrides for the spawned shell, applied on top of the inherited
+   * environment. Used to give a Claude agent its own config dir (and so its own prompt
+   * history) — see `claude_home` on the Rust side.
+   */
+  env?: Record<string, string> | null;
+  /**
+   * Called once per chunk of PTY output (for the activity monitor). Deliberately
+   * payload-free: the monitor reads state from {@link TerminalHandle.screen}, so the
+   * bytes never have to be decoded to a string here.
+   */
+  onOutput?: () => void;
   /** Called with each keystroke the user sends (for the activity monitor). */
   onInput?: (data: string) => void;
 }
@@ -75,17 +94,89 @@ export async function createTerminal(
   term.loadAddon(fitAddon);
   term.open(container);
 
+  /**
+   * Is the terminal actually laid out? FitAddon sizes the grid from
+   * `parseInt(getComputedStyle(parent).width)`, and for an element that generates no
+   * box (any `display:none` ancestor — a hidden tab, a hidden view) the resolved value
+   * of a percentage size is the COMPUTED value, i.e. the literal string "100%". Our
+   * `.term { width: 100%; height: 100% }` therefore parses as 100px x 100px and fits to
+   * an ~11x6 grid. Handing that to the PTY is not just cosmetic: `claude` paints its
+   * welcome banner ONCE, at whatever width it was started with, so the banner stays
+   * wrapped into a ~10-column ribbon for the rest of the session even after the pane is
+   * shown and resized. `clientWidth/Height` are 0 for a non-rendered element, which
+   * makes them a reliable "does this have a layout box?" test.
+   */
+  const isRendered = () => container.clientWidth > 0 && container.clientHeight > 0;
+
+  /** Fit to the container — a no-op unless the terminal is really on screen. */
+  const fit = () => {
+    if (!isRendered()) return;
+    try {
+      fitAddon.fit();
+    } catch {
+      /* transient layout state */
+    }
+  };
+
+  /**
+   * Resolve once the container has a layout box. Bounded, because a pane can legitimately
+   * stay hidden for a long time — an agent started from the Tasks page while another view
+   * is on screen must still get to work. On timeout we fall through with xterm's 80x24
+   * default, which the ResizeObserver corrects the moment the pane is shown.
+   */
+  const waitForLayout = (timeoutMs = 2500) =>
+    new Promise<void>((resolve) => {
+      if (isRendered()) return resolve();
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        observer.disconnect();
+        resolve();
+      };
+      // A display:none -> displayed transition surfaces here as a 0x0 -> WxH resize.
+      const observer = new ResizeObserver(() => {
+        if (isRendered()) finish();
+      });
+      observer.observe(container);
+      const timer = setTimeout(finish, timeoutMs);
+    });
+
   // Load the WebGL renderer, and RE-LOAD it if the GPU context is lost. WKWebView
   // drops the WebGL context on things like tab switches or display sleep; the old
   // code only disposed the addon on loss, leaving xterm on its slow DOM renderer
   // for the rest of the session — that showed up as permanently laggy scrolling.
   // Recreating the addon keeps hardware rendering (and smooth scroll) alive.
+  //
+  // But BOUNDED, because this app opens many terminals at once. WKWebView caps how many
+  // live WebGL contexts it will hand out (~16) and evicts the oldest to honour a new one,
+  // so past that cap every rebuild costs another pane its context — which rebuilds, which
+  // evicts another — a self-feeding churn loop of flicker and wasted CPU across every open
+  // terminal. After a few losses this terminal stops asking and lives on the DOM renderer:
+  // slower to scroll, but stable, and one pane paying that price is far better than all of
+  // them thrashing.
+  const WEBGL_MAX_RELOADS = 3;
+  const WEBGL_RELOAD_MS = 750;
+  let webglReloads = 0;
+  let webglTimer: ReturnType<typeof setTimeout> | undefined;
   const loadWebgl = () => {
     try {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
         webgl.dispose();
-        setTimeout(loadWebgl, 0); // rebuild on a fresh context
+        if (webglReloads >= WEBGL_MAX_RELOADS) {
+          // Logged once per terminal: with no addon loaded there is no context left to
+          // lose, so this is the last thing this handler ever says.
+          console.warn(
+            `[Codesu] WebGL context lost ${webglReloads + 1}x, staying on the DOM renderer`,
+          );
+          return;
+        }
+        webglReloads++;
+        // Backed off rather than immediate: a 0ms retry races the very eviction that
+        // caused the loss, and reliably re-triggers it.
+        webglTimer = setTimeout(loadWebgl, WEBGL_RELOAD_MS);
       });
       term.loadAddon(webgl);
     } catch (err) {
@@ -94,41 +185,38 @@ export async function createTerminal(
   };
   loadWebgl();
 
-  try {
-    fitAddon.fit();
-  } catch {
-    /* container not visible yet; resize happens when shown */
-  }
-
-  // Cell height depends on the monospace font's metrics; if the font is still
-  // loading, the first fit can miscount rows and clip the bottom line. Refit
-  // once fonts are ready.
-  document.fonts?.ready
-    .then(() => {
-      try {
-        fitAddon.fit();
-      } catch {
-        /* container not visible yet */
-      }
-    })
-    .catch(() => {});
+  // Get the grid right BEFORE the PTY exists — the shell and everything it runs
+  // inherit these dimensions for their first frame, and a TUI like `claude` paints
+  // its banner once, at the width it started with. So: wait for the pane to have a
+  // layout box, and for the font (cell metrics decide cols/rows) to be ready.
+  await waitForLayout();
+  await document.fonts?.ready.catch(() => {});
+  fit();
 
   // Rust -> terminal. Raw InvokeResponseBody arrives as an ArrayBuffer.
-  // A streaming decoder mirrors the same bytes to the activity monitor as text.
-  const decoder = new TextDecoder("utf-8", { fatal: false });
-  const emit = (bytes: Uint8Array) => {
-    term.write(bytes);
-    if (options.onOutput) options.onOutput(decoder.decode(bytes, { stream: true }));
+  //
+  // onOutput is fired from write()'s CALLBACK, not straight after the call: xterm parses
+  // asynchronously and its own docs are explicit that `buffer` does not reflect a write
+  // until the callback runs. Notifying early would tell the activity monitor "the screen
+  // changed" while it still holds the previous frame — and under heavy output, where the
+  // parser deliberately yields, that lag is unbounded.
+  //
+  // The same callback stamps `screenSeq`, a counter the mouse handling below uses to know
+  // when its reading of the screen is still good — mousemove fires far more often than
+  // the screen changes, and re-scanning the whole grid per event would be wasteful.
+  let screenSeq = 0;
+  const emit = (data: Uint8Array | string) => {
+    term.write(data, () => {
+      screenSeq++;
+      options.onOutput?.();
+    });
   };
   const onData = new Channel<unknown>();
   onData.onmessage = (msg: unknown) => {
     if (msg instanceof ArrayBuffer) emit(new Uint8Array(msg));
     else if (msg instanceof Uint8Array) emit(msg);
     else if (Array.isArray(msg)) emit(new Uint8Array(msg as number[]));
-    else if (typeof msg === "string") {
-      term.write(msg);
-      options.onOutput?.(msg);
-    }
+    else if (typeof msg === "string") emit(msg);
   };
 
   await invoke("start_pty", {
@@ -138,6 +226,7 @@ export async function createTerminal(
     shell: options.shell ?? null,
     cwd: options.cwd ?? null,
     run: options.run ?? null,
+    env: options.env ?? null,
     onData,
   });
 
@@ -225,6 +314,13 @@ export async function createTerminal(
     if (event.type !== "keydown") return true;
     const k = event.key;
 
+    // Cmd+Backspace belongs to the app ("Close Current Agent"), not the shell. xterm
+    // maps Backspace to DEL without ever looking at metaKey, then cancels the event —
+    // so left alone this both eats the shortcut and deletes a character out of whatever
+    // the user was typing to Claude. Returning false is what keeps xterm's hands off it
+    // and lets it reach the window handler in +page.svelte.
+    if (k === "Backspace" && event.metaKey) return false;
+
     if (k === "Enter") {
       if ((event.shiftKey || event.altKey) && !event.ctrlKey && !event.metaKey) {
         buf += "\n";
@@ -279,6 +375,149 @@ export async function createTerminal(
     return true;
   });
 
+  // ---------- clicking a dialog option MOVES the cursor, it never answers ----------
+  //
+  // Claude enables any-event mouse tracking (`?1003h` + SGR `?1006h`) once its REPL is
+  // up, so every pointer move and click inside a select dialog is forwarded to the PTY.
+  // Three behaviours were measured by injecting synthetic SGR reports into a real
+  // session's PTY (Claude Code 2.1.220), and all three shape the code below:
+  //
+  //   1. The mouse RELEASE answers the dialog — the press alone does nothing. So it is
+  //      the release that must never get through; letting a press pass and swallowing
+  //      only the click would still submit.
+  //   2. A pointer MOVE paints a second `❯` on the hovered row, identical in text to the
+  //      keyboard cursor.
+  //   3. That hover marker is decoration: hovering option 4 and pressing Enter still
+  //      chose option 1. It shows a selection the keyboard does not agree with.
+  //
+  // So while a dialog is up we take the whole gesture — move, press, release, click —
+  // away from xterm, which kills the lying hover marker, and translate a click into the
+  // arrow keys that walk the REAL cursor onto the clicked option. Enter then answers,
+  // and what is highlighted is what gets chosen.
+  //
+  // Deliberately narrow: only a plain left click, only while the live screen is showing
+  // a numbered select list, and only over the grid. Everything else — Alt-drag to force
+  // a selection, wheel, any other TUI — reaches xterm untouched.
+
+  /** The `.xterm-screen` box, which is exactly the character grid (no padding). */
+  const gridEl = () => container.querySelector(".xterm-screen") as HTMLElement | null;
+
+  /** Viewport row under the pointer, or null if the pointer is outside the grid. */
+  const rowAt = (e: MouseEvent): number | null => {
+    const rect = gridEl()?.getBoundingClientRect();
+    if (!rect || rect.height <= 0) return null;
+    if (e.clientX < rect.left || e.clientX >= rect.right) return null;
+    if (e.clientY < rect.top || e.clientY >= rect.bottom) return null;
+    const row = Math.floor(((e.clientY - rect.top) / rect.height) * term.rows);
+    return Math.min(term.rows - 1, Math.max(0, row));
+  };
+
+  /** The rows of the LIVE screen (from `baseY`), i.e. what the activity monitor reads. */
+  const liveLines = (): string[] => {
+    const b = term.buffer.active;
+    const lines: string[] = [];
+    for (let y = 0; y < term.rows; y++) {
+      lines.push(b.getLine(b.baseY + y)?.translateToString(true) ?? "");
+    }
+    return lines;
+  };
+
+  /**
+   * The live screen while a dialog is up, else null. Recomputed only when xterm has
+   * parsed new output, which makes it cheap enough to call from every mousemove and,
+   * unlike a time-based throttle, never stale: a dialog is recognised on the very first
+   * event after the frame that drew it, leaving no window in which a motion report could
+   * slip through and paint a hover marker.
+   */
+  let seenSeq = -1;
+  let dialogScreen: string[] | null = null;
+  const liveDialog = (): string[] | null => {
+    if (seenSeq !== screenSeq) {
+      seenSeq = screenSeq;
+      const lines = liveLines();
+      dialogScreen = readScreenSignal(lines.join("\n")) === "blocked" ? lines : null;
+    }
+    return dialogScreen;
+  };
+
+  /**
+   * The live row under the pointer while a dialog is up, or null if this gesture is none
+   * of our business. Anchored to `baseY` rather than to the viewport, because the pane
+   * restores its scroll position when shown and can sit a row or two off the bottom — the
+   * dialog is still live and clickable there. A pointer over real scrollback has no live
+   * row and is left alone.
+   */
+  const dialogRowAt = (e: MouseEvent): { row: number; lines: string[] } | null => {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return null;
+    const lines = liveDialog();
+    if (!lines) return null;
+    const row = rowAt(e);
+    if (row === null) return null;
+    const b = term.buffer.active;
+    const liveRow = b.viewportY + row - b.baseY;
+    if (liveRow < 0 || liveRow >= term.rows) return null;
+    return { row: liveRow, lines };
+  };
+
+  /** Walk the cursor onto the clicked option. Returns true if the event was consumed. */
+  const steerDialog = (e: MouseEvent): boolean => {
+    if (e.button !== 0) return false;
+    const at = dialogRowAt(e);
+    if (!at) return false;
+
+    // Consume the gesture from here on: a dialog is up and the pointer is over the live
+    // grid, so nothing about this click may reach Claude — not a click on the already
+    // selected option, and not one on the dialog's body, which would answer it too.
+    const list = readSelectList(at.lines, at.row);
+    const target = list && selectOptionAtRow(list, at.row);
+    if (list && target !== null) {
+      const delta = target - list.cursor;
+      if (delta !== 0) write((delta > 0 ? "\x1b[B" : "\x1b[A").repeat(Math.abs(delta)));
+    }
+    return true;
+  };
+
+  // preventDefault() on mousedown also blocks the focus that click would have given
+  // xterm's hidden textarea, so focus is taken explicitly — Enter has to land here next.
+  const swallow = (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+  };
+
+  // Capture phase on the container runs before xterm's own listeners on its descendants.
+  // Both halves of the gesture matter: xterm reports the press from `mousedown` and then
+  // registers a document-level `mouseup` to report the release — the one Claude answers
+  // on — so the press must be stopped before that listener is ever attached, and the
+  // release stopped too in case the press began outside the grid.
+  let swallowing = false;
+  const onMouseDown = (e: MouseEvent) => {
+    swallowing = steerDialog(e);
+    if (!swallowing) return;
+    swallow(e);
+    term.focus();
+  };
+  const onMouseRest = (e: MouseEvent) => {
+    if (!swallowing && !(e.type === "mouseup" && e.button === 0 && dialogRowAt(e))) return;
+    if (e.type === "click") swallowing = false;
+    swallow(e);
+  };
+  // Motion is swallowed too, and every single event of it: the hover marker Enter does
+  // not honour can only be painted by a motion report, so suppressing all of them while a
+  // dialog is up leaves exactly one ❯ on screen — the real cursor. That is what makes the
+  // delta below trustworthy. preventDefault() is deliberately not called; stopping the
+  // propagation is enough to keep xterm from reporting, and mousemove has no default
+  // worth suppressing.
+  const onMouseMove = (e: MouseEvent) => {
+    if (!dialogRowAt(e)) return;
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+  };
+  container.addEventListener("mousedown", onMouseDown, true);
+  container.addEventListener("mouseup", onMouseRest, true);
+  container.addEventListener("click", onMouseRest, true);
+  container.addEventListener("mousemove", onMouseMove, true);
+
   const resizeDisp = term.onResize(({ cols, rows }) => {
     invoke("resize_pty", { id, cols, rows }).catch(() => {});
   });
@@ -286,7 +525,7 @@ export async function createTerminal(
   let frame = 0;
   const ro = new ResizeObserver(() => {
     cancelAnimationFrame(frame);
-    frame = requestAnimationFrame(() => fitAddon.fit());
+    frame = requestAnimationFrame(fit);
   });
   ro.observe(container);
 
@@ -307,17 +546,28 @@ export async function createTerminal(
 
   return {
     fit: () => {
-      try {
-        fitAddon.fit();
-        // Force a redraw. When a pane is revealed after being display:none, fit()
-        // is a no-op if the size is unchanged, and the WebGL renderer can leave a
-        // stale/blank canvas (menus look broken/unselectable). A refresh repaints.
-        term.refresh(0, term.rows - 1);
-      } catch {
-        /* container not visible yet */
-      }
+      if (!isRendered()) return; // hidden pane: fitting here would size it to "100%" = 100px
+      fit();
+      // Force a redraw. When a pane is revealed after being display:none, fit()
+      // is a no-op if the size is unchanged, and the WebGL renderer can leave a
+      // stale/blank canvas (menus look broken/unselectable). A refresh repaints.
+      term.refresh(0, term.rows - 1);
     },
     focus: () => term.focus(),
+    // Read the live frame from the bottom of the buffer, defaulting to the whole
+    // viewport. Anything above it is scrolled-past history and stays out of view —
+    // which is what keeps the reading current without any staleness bookkeeping.
+    screen: (maxRows = term.rows) => {
+      const buf = term.buffer.active;
+      const bottom = buf.baseY + term.rows - 1;
+      const top = Math.max(0, bottom - maxRows + 1);
+      const rows: string[] = [];
+      for (let y = top; y <= bottom; y++) {
+        const line = buf.getLine(y);
+        if (line) rows.push(line.translateToString(true));
+      }
+      return rows.join("\n");
+    },
     getScrollPosition: () => {
       // Get the current scroll position from the viewport
       const scrollElement = container.querySelector(".xterm-viewport") as HTMLElement | null;
@@ -339,8 +589,13 @@ export async function createTerminal(
     },
     dispose: () => {
       cancelAnimationFrame(frame);
+      clearTimeout(webglTimer); // a pending WebGL rebuild must not outlive the terminal
       ro.disconnect();
       scrollDisp();
+      container.removeEventListener("mousedown", onMouseDown, true);
+      container.removeEventListener("mouseup", onMouseRest, true);
+      container.removeEventListener("click", onMouseRest, true);
+      container.removeEventListener("mousemove", onMouseMove, true);
       dataDisp.dispose();
       resizeDisp.dispose();
       invoke("kill_pty", { id }).catch(() => {});

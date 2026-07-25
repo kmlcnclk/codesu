@@ -2,6 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { SvelteSet } from "svelte/reactivity";
 import { playDone, playBlocked } from "$lib/sound";
 import {
+  readScreenSignal,
+  stepTurn,
+  freshTurnMemo,
+  type ScreenSignal,
+  type TurnMemo,
+} from "$lib/terminal/claudeScreen";
+import {
   type LayoutNode,
   type Dir,
   leaf as makeLeaf,
@@ -40,15 +47,6 @@ export interface Shortcut {
  */
 export type AgentState = "working" | "blocked" | "done" | "idle" | "exited";
 
-/** Sort weight: blocked & done float to the top so they're impossible to miss. */
-export const STATE_ORDER: Record<AgentState, number> = {
-  blocked: 0,
-  done: 1,
-  working: 2,
-  idle: 3,
-  exited: 4,
-};
-
 /**
  * Priority ordering of agent states for the sidebar roster (see {@link AppStore.rosterOf}):
  * blocked → done → working → idle → exited. Within a group, most-recently-changed on
@@ -71,45 +69,8 @@ export const STATE_META: Record<AgentState, { label: string; color: string }> = 
   exited: { label: "Exited", color: "#6b7789" },
 };
 
-/**
- * Heuristics for reading Claude Code's TUI out of the raw (ANSI-stripped) output
- * tail. Kept as plain arrays so they're trivial to tune as the CLI evolves.
- */
-// A quiet terminal whose tail matches any of these means Claude wants an answer.
-const BLOCKED_MARKERS = [
-  /Do you want to/i,
-  /Would you like/i,
-  /❯\s*1\.\s/, // selection menu cursor on the first option
-  /\bYes, and\b/i,
-  /No, and tell Claude/i,
-  /\(y\/n\)/i,
-  /Press\s+.*\bto (confirm|continue|select)/i,
-];
-/**
- * Claude's live "working" status line. While a turn is settling we treat the agent
- * as still working for as long as this is the MOST RECENT thing drawn — so a short
- * thinking pause never fires "done" early. The instant Claude replaces it with the
- * result / input box, the turn is recognised as finished.
- */
-const SPINNER_MARKERS = [/esc to interrupt/i];
-// Only the freshest slice is checked, so a stale spinner line can't pin "working".
-// Kept small: the spinner is always the last line WHILE working, but as soon as the
-// turn ends Claude draws its input box, pushing the phrase out of this window fast.
-const SPINNER_WINDOW = 160;
-/**
- * A live spinner reprints its line at least once a second (the elapsed-time
- * counter ticks). So if no output has arrived for this long, any "esc to interrupt"
- * still sitting in the tail is STALE — the turn really finished. Without this gate a
- * lingering spinner phrase can pin an agent as "working" forever after it's done.
- */
-const SPINNER_STALE_MS = 2000;
-/**
- * Silence this long ⇒ a turn is settling. Kept short so the "done" chime/animation
- * fire promptly; the SPINNER_MARKERS keep-alive guards against firing mid-thought.
- */
-const WORKING_QUIET_MS = 600;
-/** How often the activity monitor re-derives every agent's state. */
-const MONITOR_TICK_MS = 200;
+/** How often the activity monitor re-reads every live agent's screen. */
+const MONITOR_TICK_MS = 250;
 /**
  * How long a launched, off-screen agent may sit unused before its PTY is reclaimed
  * to free system resources. The Claude session is NOT lost — it's resumed via
@@ -118,16 +79,15 @@ const MONITOR_TICK_MS = 200;
 const IDLE_SLEEP_MS = 60 * 60 * 1000; // 1 hour
 /** How often the idle-reaper looks for agents to put to sleep. */
 const REAP_TICK_MS = 60 * 1000; // 1 minute
-/** Bytes of stripped tail we retain per agent for prompt detection. */
-const TAIL_CAP = 3000;
-
-// CSI / OSC / single-escape sequences, plus stray control bytes.
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
-// eslint-disable-next-line no-control-regex
-const CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
-function stripAnsi(s: string): string {
-  return s.replace(ANSI_RE, "").replace(CTRL_RE, "");
+/**
+ * The live state a dormant agent is allowed to come back as. A restored agent has NO
+ * process — nothing can be mid-turn — so `working` (which would pulse "Working…" for
+ * an agent that isn't even running) and `exited` (its PTY is simply gone, and the pane
+ * offers Resume) both land on `idle`. `blocked` and `done` still mean "this one needs
+ * you", so they survive and keep their place at the top of the roster.
+ */
+function restoredState(saved: unknown): AgentState {
+  return saved === "blocked" || saved === "done" ? saved : "idle";
 }
 
 export interface TaskMeta {
@@ -250,11 +210,29 @@ export interface Agent {
   cwd: string | null;
   lane: TaskStatus; // agent's own kanban lane when not dedicated to a task (default "backlog")
   taskId: string | null; // which item (if any) this agent is currently dedicated to
+  /** Position among the workspace's TABS (Agents view). See {@link AppState.tabsOf}. */
   order: number;
+  /**
+   * Position of this agent's card within its lane on the Tasks board — the kanban's
+   * OWN ordering key, deliberately separate from {@link order}. The board used to
+   * rewrite `order` on every drag, which silently reshuffled the user's tabs in the
+   * Agents view. Undefined until the card is first dragged; those agents fall back to
+   * `order` so an untouched board keeps exactly its previous arrangement.
+   */
+  laneOrder?: number;
   /** Stable Claude Code session id (uuid) so the conversation can be resumed. */
   sessionId: string | null;
   /** Whether this Claude session has been launched at least once (=> resume, not create). */
   sessionStarted: boolean;
+  /**
+   * The directory the Claude session was FIRST created in, captured on first launch.
+   * `claude --resume <id>` is project/cwd-scoped — it only finds a session when run
+   * from the same directory it was created in — so the agent must always be launched
+   * here, even if its workspace path later changes (e.g. a worktree is relocated).
+   * Binding to this is what stops a resume from silently starting an EMPTY session.
+   * Null until the first launch, and for non-Claude agents.
+   */
+  sessionCwd: string | null;
   /** When the agent was created (epoch ms) — surfaced on the History page. */
   createdAt: number;
   /**
@@ -279,6 +257,21 @@ export interface Agent {
   stateChangedAt: number;
   /** True once the user has looked at this agent's finished work (clears "done"). */
   acknowledged: boolean;
+}
+
+/**
+ * A closed agent kept whole so it can be put back (⌘⇧Z — see
+ * {@link AppState.reopenLastAgent}). Closing is destructive and permanent, and is
+ * reachable from several one-click places with no confirmation, so the WHOLE record
+ * is snapshotted: keeping only the id (as this used to) could never work, because
+ * {@link AppState.removeAgent} hard-deletes the agent the id pointed at.
+ */
+export interface ClosedAgent {
+  /** The agent exactly as it was closed. Re-inserted verbatim, minus runtime fields. */
+  agent: Agent;
+  /** Its tab's split tree at the moment of the close, so a reopened pane lands back in
+   * the arrangement it left. Null when the tab had no stored layout (a lone pane). */
+  layout: LayoutNode | null;
 }
 
 export interface Workspace {
@@ -306,10 +299,19 @@ export function runCommandFor(kind: AgentKind, custom: string): string | null {
   return null;
 }
 
-let counter = 0;
+/**
+ * A globally unique id, prefixed so it stays readable in state files and logs.
+ *
+ * The suffix is a UUID rather than a counter: the old `counter`-plus-
+ * `performance.now()` scheme could COLLIDE ACROSS RESTARTS, because the counter was
+ * re-seeded from the current item count (so every deletion freed a slot) and
+ * `performance.now()` restarts near zero on each launch — an `agent-4-8123` minted
+ * ~8.1s into one session could be minted again in a later one, and a duplicate id
+ * corrupts every keyed list and `find(x => x.id === …)` lookup. Nothing parses the
+ * suffix (only the prefix is ever read, and only by humans), so this is a free fix.
+ */
 function uid(prefix: string): string {
-  counter += 1;
-  return `${prefix}-${counter}-${Math.floor(performance.now())}`;
+  return `${prefix}-${crypto.randomUUID()}`;
 }
 
 function basename(p: string): string {
@@ -424,8 +426,8 @@ class AppState {
   notePreview = $state<Record<string, boolean>>({});
   /** The note the user last had open, restored when re-entering the Notes page. */
   lastNoteId = $state<string | null>(null);
-  /** Last closed agent for undo/reopen. */
-  lastClosedAgentId = $state<string | null>(null);
+  /** Last closed agent, snapshotted whole for undo/reopen. See {@link ClosedAgent}. */
+  lastClosed = $state<ClosedAgent | null>(null);
   /** Width (px) of the left sidebar rail — user-resizable, persisted. */
   sidebarWidth = $state(268);
   /** Fraction (0–1) of the sidebar's list area given to the Workspaces section;
@@ -438,10 +440,18 @@ class AppState {
    * Agents whose Claude/shell process the user has explicitly opened THIS run.
    * Session-scoped and deliberately NOT persisted: on a fresh launch it starts
    * empty, so restoring the last-active agent shows it but does NOT auto-spawn its
-   * PTY / resume Claude. A process only starts on an explicit user action —
-   * clicking its tab or roster row, switching into its workspace, creating it, or
-   * restoring it from History. This is what stops many agents from all launching at
-   * once when the app is reopened.
+   * PTY / resume Claude.
+   *
+   * A Claude session is NEVER resumed automatically. A process starts on exactly two
+   * explicit actions:
+   *   1. CREATING a new agent (addAgent) — there is no prior conversation to resume,
+   *      so it launches immediately (and may seed a task prompt);
+   *   2. clicking the "Resume" placeholder on an existing agent (launchAgent).
+   * Merely SELECTING/focusing an agent — clicking its tab or roster row, switching
+   * into its workspace, opening it from another page, reopen, or restore-from-History
+   * — does NOT launch it: the pane shows the "Resume" placeholder until clicked. This
+   * guarantees a saved conversation is only ever continued by a deliberate click, and
+   * stops many agents from launching at once when the app is reopened.
    * @see TerminalPane — gates `start()` on {@link isLaunched}.
    */
   launchedAgentIds = new SvelteSet<string>();
@@ -454,6 +464,19 @@ class AppState {
    * Session-scoped and deliberately NOT persisted.
    */
   private sleepingAgentIds = new Set<string>();
+
+  /**
+   * Workspace paths that are NOT directories on disk any more — a folder that was
+   * moved or renamed, or a worktree deleted outside the app (e.g. workspaces created
+   * before worktrees moved to `~/.codesu/worktrees`).
+   *
+   * Agents there cannot be launched: the PTY refuses a missing cwd rather than
+   * silently starting in `$HOME`, which used to make Claude Code re-ask "do you trust
+   * this folder?" for the home directory on every open. Kept as a session-scoped path
+   * set (not per workspace id) so duplicate workspaces on one path resolve together.
+   * @see checkWorkspacePaths
+   */
+  missingPaths = new SvelteSet<string>();
 
   private loaded = false;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -474,7 +497,9 @@ class AppState {
       { id: "split-pane-vertical", name: "Split Pane (side by side)", key: "d", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "split-pane-vertical" },
       { id: "split-pane-horizontal", name: "Split Pane (stacked)", key: "d", ctrl: false, shift: true, alt: false, meta: true, context: "agents", action: "split-pane-horizontal" },
       { id: "flip-split", name: "Flip Split Direction", key: "e", ctrl: false, shift: true, alt: false, meta: true, context: "agents", action: "flip-split" },
-      { id: "close-current-agent", name: "Close Current Agent", key: "Delete", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "close-current-agent" },
+      // "Backspace", not "Delete": the Mac delete key reports `e.key === "Backspace"`,
+      // so the advertised ⌘⌫ never matched the old binding (only Fn+Delete did).
+      { id: "close-current-agent", name: "Close Current Agent", key: "Backspace", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "close-current-agent" },
       { id: "reopen-last-agent", name: "Reopen Last Closed Agent", key: "z", ctrl: false, shift: true, alt: false, meta: true, context: "agents", action: "reopen-last-agent" },
       { id: "select-tab-1", name: "Select Tab 1", key: "1", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "select-tab-1" },
       { id: "select-tab-2", name: "Select Tab 2", key: "2", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "select-tab-2" },
@@ -517,6 +542,60 @@ class AppState {
   }
   get activeWorkspace(): Workspace | undefined {
     return this.workspaces.find((w) => w.id === this.activeWorkspaceId);
+  }
+
+  /**
+   * The directory an agent actually runs in: its own `cwd` when set, otherwise its
+   * workspace's path. Null when neither is usable — a workspace row that has gone, or
+   * a blank path (`addWorkspace` does not reject one, and legacy state files carry
+   * them). A blank string is normalised to null on purpose: the PTY reads "no cwd" as
+   * `$HOME`, which is right for the system terminal but catastrophic for an agent, so
+   * TerminalPane refuses to launch a null instead of passing it down.
+   */
+  cwdOf(agent: Agent): string | null {
+    // A started Claude session is PINNED to the directory it was created in
+    // (`sessionCwd`): `claude --resume` is cwd-scoped, so running from anywhere else
+    // finds no conversation and creates a fresh EMPTY one. This wins over the (possibly
+    // drifted) workspace path so resume always lands in the right project. A brand-new
+    // agent (sessionCwd null) uses its explicit cwd or the workspace path, and binds
+    // sessionCwd on first launch (see markSessionStarted).
+    const dir =
+      agent.sessionCwd ?? agent.cwd ?? this.workspaces.find((w) => w.id === agent.workspaceId)?.path;
+    return dir && dir.trim() ? dir : null;
+  }
+
+  /** True when this path was found to be gone by {@link checkWorkspacePaths}. */
+  isPathMissing(path: string | null | undefined): boolean {
+    return !!path && this.missingPaths.has(path);
+  }
+
+  /** True when the workspace's folder is gone — its agents cannot be launched. */
+  isWorkspaceMissing(workspaceId: string): boolean {
+    const w = this.workspaces.find((x) => x.id === workspaceId);
+    return !!w && this.isPathMissing(w.path);
+  }
+
+  /**
+   * Re-check every live workspace folder against the filesystem and refresh
+   * {@link missingPaths}. Cheap (one stat per distinct path) and safe to re-run — it
+   * is called after load and whenever the window regains focus, so a folder deleted
+   * or restored outside the app is picked up without a restart.
+   */
+  async checkWorkspacePaths(): Promise<void> {
+    const paths = [...new Set(this.liveWorkspaces.map((w) => w.path).filter(Boolean))];
+    const results = await Promise.all(
+      paths.map(async (p) => {
+        try {
+          return [p, await invoke<boolean>("dir_exists", { path: p })] as const;
+        } catch {
+          return [p, true] as const; // never flag a workspace on an IPC failure
+        }
+      }),
+    );
+    for (const [p, exists] of results) {
+      if (exists) this.missingPaths.delete(p);
+      else this.missingPaths.add(p);
+    }
   }
 
   /** Non-done agents of a workspace, ordered — these become the tabs. */
@@ -656,6 +735,7 @@ class AppState {
     const tree = this.layoutFor(groupId);
     const focus = keep ? cur! : (tree ? collectLeafIds(tree)[0] : agents[0].id);
     this.activeTabByWs[wsId] = groupId;
+    // setActiveAgent writes the same tab id and persists both maps, so no save here.
     this.setActiveAgent(focus);
   }
 
@@ -789,7 +869,16 @@ class AppState {
     ws.archived = true;
     // Archive the workspace's agents along with it — they leave the active UI and
     // their PTYs are torn down (via mountedAgents), then restored on unarchive.
-    for (const a of this.agents) if (a.workspaceId === id) a.archived = true;
+    for (const a of this.agents) {
+      if (a.workspaceId !== id) continue;
+      a.archived = true;
+      // Their panes unmount and TerminalPane kills the PTYs, so these agents are no
+      // longer "explicitly opened this run". Leaving the ids behind made
+      // unarchiveWorkspace remount panes that still counted as launched, and each one
+      // immediately ran `claude --resume` — an auto-resume the user never asked for.
+      // A session may only ever be continued by creating an agent or clicking Resume.
+      this.launchedAgentIds.delete(a.id);
+    }
     if (this.activeWorkspaceId === id) {
       this.activeWorkspaceId = this.liveWorkspaces[0]?.id ?? null;
     }
@@ -805,6 +894,9 @@ class AppState {
     ws.order = nextOrder(this.workspaces.filter((w) => !w.archived && w.id !== id));
     for (const a of this.agents) if (a.workspaceId === id) a.archived = false;
     this.activeWorkspaceId = id;
+    // The restored panes remount UNLAUNCHED (archiveWorkspace cleared their ids from
+    // launchedAgentIds), so each shows the "Resume" placeholder instead of silently
+    // resuming its Claude session.
     this.persist();
   }
 
@@ -817,13 +909,14 @@ class AppState {
     const activeId = this.activeAgentByWs[id];
     const active = activeId ? this.agents.find((x) => x.id === activeId) : null;
     this.activeTabByWs[id] = active?.groupId ?? this.tabGroups(id)[0]?.groupId ?? null;
-    // Switching into a workspace is an explicit user action → auto-resume its
-    // active agent (unlike a fresh app launch, which restores state via load()
-    // and leaves every agent dormant until clicked).
-    if (active) {
-      this.launchedAgentIds.add(active.id);
-      active.lastUsedAt = Date.now(); // opened → clear of the idle-reaper
-    }
+    // Switching into a workspace only reveals its active agent — it does NOT resume
+    // the Claude session. The pane shows the "Resume" placeholder; the user must
+    // click it to spawn the PTY and continue the conversation. A saved session is
+    // never auto-continued.
+    // The selection above is persisted state; without this save it only reached disk
+    // if some later action happened to trigger one, so quitting lost it. persist() is
+    // debounced (250ms), so a burst of clicks still costs a single write.
+    this.persist();
   }
 
   reorderWorkspaces(draggedId: string, targetId: string) {
@@ -915,6 +1008,7 @@ class AppState {
       order: nextOrder(siblings),
       sessionId: input.kind === "claude" ? crypto.randomUUID() : null,
       sessionStarted: false,
+      sessionCwd: null,
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
       initialPrompt: input.initialPrompt ?? null,
@@ -950,21 +1044,24 @@ class AppState {
   setActiveAgent(id: string) {
     const a = this.agents.find((x) => x.id === id);
     if (!a) return;
-    // Opening an agent's terminal counts as using it → keep it clear of the
-    // idle-reaper (which sleeps agents untouched for over an hour).
     a.lastUsedAt = Date.now();
     this.activeWorkspaceId = a.workspaceId;
     this.activeAgentByWs[a.workspaceId] = id;
     // Focusing a pane also selects the tab it lives in.
     this.activeTabByWs[a.workspaceId] = a.groupId;
     // Selecting an agent (tab / roster click, tab-index shortcut, open-from-page,
-    // reopen, restore-from-history) is an explicit user open → allow its PTY to
-    // start. Distinct from the fresh-launch restore in load(), which never lands
-    // here and so leaves the agent dormant until clicked.
-    this.launchedAgentIds.add(id);
+    // reopen, restore-from-history) only FOCUSES it — it does NOT resume the Claude
+    // session. The pane shows the "Resume" placeholder until the user clicks it
+    // (launchAgent), which is the sole path that spawns the PTY / resumes a saved
+    // conversation. A brand-new agent still starts on creation (addAgent), since it
+    // has no prior session to resume.
     // NOTE: merely selecting the tab does NOT clear a "done" badge — the agent keeps
     // showing "done" until the user actually clicks into its terminal (see
     // markReviewed). Blocked is never cleared this way.
+    // `lastUsedAt` and the two selection maps are persisted fields, so save them —
+    // otherwise the focused agent/tab only survived a quit by luck. persist() is
+    // debounced (250ms), which is what makes it cheap enough for every click.
+    this.persist();
   }
 
   /** Whether the user has explicitly opened this agent this run (see {@link launchedAgentIds}). */
@@ -1005,19 +1102,19 @@ class AppState {
     this.sleepingAgentIds.add(id);
     this.launchedAgentIds.delete(id); // TerminalPane disposes the PTY in response
     a.status = "idle";
-    this.activity.delete(id); // drop stale spinner/tail tracking
+    this.activity.delete(id); // drop turn tracking
+    this.screens.delete(id); // its terminal is going away — no ground truth to read
   }
 
   /**
-   * The user interacted with an agent's terminal (clicked or typed into it). A
-   * finished (done) agent is now reviewed → idle. A blocked agent is also cleared:
-   * the user is here handling it, so the red "needs input" pulse has done its job.
+   * The user interacted with an agent's terminal (clicked or typed into it) — a
+   * finished (done) agent has now been looked at, so it drops back to idle.
    *
-   * Clearing blocked MUST also wipe the detection tail/spell — otherwise the stale
-   * prompt phrase still sitting in the tail would re-trigger "blocked" on the very
-   * next monitor tick, which is the "stuck error animation that won't clear" bug.
-   * If Claude genuinely wants more input it redraws its prompt (new output), which
-   * re-blocks cleanly; a live spinner still takes it straight to "working".
+   * "Blocked" is deliberately NOT cleared here: it means a dialog is on screen right
+   * now, which is true whether or not the user has glanced at the pane. It clears
+   * itself within a tick of Claude erasing that dialog (answered, or dismissed with
+   * esc) — see tickMonitor. Faking the clear on interaction is what used to need the
+   * tail/spell wipe, and that wipe was itself the "state won't come back" bug.
    */
   markReviewed(id: string) {
     const a = this.agents.find((x) => x.id === id);
@@ -1031,14 +1128,9 @@ class AppState {
       a.acknowledged = true;
       a.state = "idle";
       a.stateChangedAt = Date.now();
-    } else if (a.state === "blocked") {
-      if (rec) {
-        rec.tail = "";
-        rec.spell = false;
-        rec.alertedBlocked = false;
-      }
-      a.state = "idle";
-      a.stateChangedAt = Date.now();
+      // These are persisted fields; without this a review made just before quitting
+      // was lost and the agent came back wearing a stale "done" badge.
+      this.persist();
     }
   }
 
@@ -1051,6 +1143,11 @@ class AppState {
   setAgentLane(id: string, lane: TaskStatus) {
     const a = this.agents.find((x) => x.id === id);
     if (!a) return;
+    // `laneOrder` is a position WITHIN one lane, so it means nothing in the lane the
+    // card is moving to — carried across, a once-dragged card lands at an arbitrary
+    // slot among cards still sorting by `order`. Clearing it drops the card back to
+    // the `order` fallback until the user drags it again.
+    if (this.effectiveLane(a) !== lane) a.laneOrder = undefined;
     // Coming back from Done re-enters the tab list — give it a fresh end slot so its
     // stale `order` can't collide with a tab that took that slot while it was gone.
     if (this.effectiveLane(a) === "done" && lane !== "done") {
@@ -1086,7 +1183,9 @@ class AppState {
     const ws = a.workspaceId;
     const groupId = a.groupId;
     const wasActive = this.activeAgentByWs[ws] === id;
-    this.lastClosedAgentId = id; // Track for undo/reopen
+    // Snapshot the WHOLE agent (and its tab's split tree, captured before the leaf is
+    // pruned below) so ⌘⇧Z can put it back — the record itself is about to be deleted.
+    this.lastClosed = { agent: { ...a }, layout: this.tabLayouts[groupId] ?? null };
     this.launchedAgentIds.delete(id);
     this.agents = this.agents.filter((x) => x.id !== id);
     // Intentionally leave dangling ids in task.agentIds[] (same soft-ref convention as ActivityEntry.refId);
@@ -1152,16 +1251,52 @@ class AppState {
     this.persist();
   }
 
-  /** Reopen the last closed agent. */
-  reopenLastAgent() {
-    if (!this.lastClosedAgentId) return null;
-    const agent = this.agents.find((a) => a.id === this.lastClosedAgentId);
-    if (agent) {
-      this.setActiveAgent(agent.id);
-      this.lastClosedAgentId = null;
-      return agent;
-    }
-    return null;
+  /**
+   * Put the last closed agent back (⌘⇧Z), re-inserting the {@link ClosedAgent}
+   * snapshot {@link removeAgent} took. One-shot: the snapshot is consumed, so a second
+   * press does nothing.
+   *
+   * It comes back UNLAUNCHED — deliberately not added to {@link launchedAgentIds} —
+   * so its pane shows the "Resume" placeholder and nothing resumes the conversation
+   * until the user clicks it. Its live fields are re-derived the same way a restored
+   * agent's are (see restoredState): nothing is running, so it cannot be mid-turn.
+   *
+   * {@link closeTab} closes each pane in turn, so after closing a whole tab this
+   * restores just the LAST pane that was closed, not the entire tab — one undo step
+   * per close, matching what the six one-click Close buttons each do.
+   *
+   * Refuses when the agent's workspace is gone or archived (there is nowhere visible
+   * to put it back), dropping the snapshot rather than resurrecting a hidden agent.
+   */
+  reopenLastAgent(): Agent | null {
+    const snap = this.lastClosed;
+    if (!snap) return null;
+    // Guards run BEFORE the snapshot is consumed: a refusal must not also destroy the
+    // undo. The workspace can come back (unarchive) and the id clash can clear, so a
+    // press that can't be honoured now is a no-op, not a one-way loss.
+    const ws = this.workspaces.find((w) => w.id === snap.agent.workspaceId);
+    if (!ws || ws.archived) return null;
+    if (this.agents.some((x) => x.id === snap.agent.id)) return null;
+    this.lastClosed = null;
+
+    const agent: Agent = {
+      ...snap.agent,
+      archived: false,
+      // A fresh end-of-list slot: its old `order` may have been taken by a tab that
+      // moved up while it was gone (removeAgent doesn't re-sequence).
+      order: nextOrder(this.agents.filter((x) => x.workspaceId === ws.id)),
+      status: "idle",
+      exitCode: null,
+      state: restoredState(snap.agent.state),
+      stateChangedAt: Date.now(),
+      lastUsedAt: Date.now(),
+    };
+    this.agents.push(agent);
+    // Restore the tab's arrangement; layoutFor reconciles it against whatever panes
+    // the group has now, so a tree that references departed siblings is harmless.
+    if (snap.layout) this.tabLayouts = { ...this.tabLayouts, [agent.groupId]: snap.layout };
+    this.setActiveAgent(agent.id); // focuses (never launches) and persists
+    return agent;
   }
 
   reorderAgents(draggedId: string, targetId: string) {
@@ -1206,6 +1341,10 @@ class AppState {
       if (slept && !this.launchedAgentIds.has(id) && slept.status !== "exited") {
         slept.status = "idle";
       }
+      // sleepAgent already dropped the turn record, but a late PTY chunk arriving
+      // between the kill and this exit event can recreate one via noteOutput. Drop it
+      // again so the agent doesn't carry a stale half-turn into its next launch.
+      this.activity.delete(id);
       return;
     }
     const a = this.agents.find((x) => x.id === id);
@@ -1469,7 +1608,14 @@ class AppState {
       t.details = patch.details.trim();
       t.updatedAt = Date.now();
     }
-    if (patch.status !== undefined) t.status = patch.status;
+    if (patch.status !== undefined) {
+      t.status = patch.status;
+      // The task's card and every agent card linked to it change lane together, so
+      // their within-lane positions lapse for the same reason as in setAgentLane.
+      if (patch.status !== was) {
+        for (const a of this.agents) if (a.taskId === id) a.laneOrder = undefined;
+      }
+    }
     if (patch.attachments !== undefined) t.attachments = patch.attachments;
     // Completing a task archives it — off the board.
     if (patch.status === "done") {
@@ -1593,62 +1739,75 @@ class AppState {
 
   // ---------- activity monitor ----------
   //
-  // The frontend feeds every PTY output batch into noteOutput(); a low-frequency
-  // ticker then re-derives each Claude agent's AgentState purely from Claude's own
-  // live spinner ("esc to interrupt"). That spinner shows ONLY while Claude is
-  // processing a user prompt — so relaunching (`claude`), quitting (`exit`),
-  // resuming on startup, or any other terminal noise never counts as "working" and
-  // never fires a sound. Non-Claude agents have no such lifecycle at all.
+  // Every 250ms each live Claude agent's AgentState is re-derived from what its
+  // terminal is ACTUALLY DISPLAYING — xterm's own screen buffer, read through the
+  // reader each mounted pane registers here and interpreted by readScreenSignal
+  // (see $lib/terminal/claudeScreen, which documents the markers and the real frames
+  // they were verified against). Claude draws those markers and Claude erases them, so
+  // the state follows the real turn and self-heals: nothing can stay pinned to a phrase
+  // that has left the screen. That is the whole point of reading the screen instead of
+  // accumulating the byte stream, which is what used to leave agents stuck "working" or
+  // "blocked" and replay chimes on every redraw.
+  //
+  // Relaunching (`claude`), quitting (`exit`), resuming a session or any other
+  // terminal noise draws no status line, so it never counts as a turn and never fires
+  // a sound. Non-Claude agents have no turn lifecycle at all.
 
   /**
-   * Per-agent activity — intentionally OUTSIDE $state to avoid reactivity churn.
-   *   spell        — inside a working spell (Claude's spinner has been live)
-   *   reviewPending— a finished spell is waiting to be reviewed (drives "done")
-   *   alertedBlocked— the blocked chime has already sounded for the CURRENT block, so
-   *                   a prompt redraw (which flickers blocked→working→blocked) can't
-   *                   replay it on a loop. Re-armed only when work genuinely resumes
-   *                   (live spinner) or the turn ends.
+   * Per-agent activity — intentionally OUTSIDE $state to avoid reactivity churn. The turn
+   * fields are {@link TurnMemo}, owned by the stepTurn reducer; the two frame counters are
+   * the monitor's own read gate:
+   *   frame     — counts screen updates; bumped once per PARSED chunk of output
+   *   readFrame — the `frame` the last screen reading was taken at
    */
-  private activity = new Map<
-    string,
-    {
-      lastByteAt: number;
-      tail: string;
-      spell: boolean;
-      reviewPending: boolean;
-      alertedBlocked: boolean;
-    }
-  >();
+  private activity = new Map<string, TurnMemo & { frame: number; readFrame: number }>();
+  /** Live screen readers, one per mounted terminal. Also outside $state. */
+  private screens = new Map<string, (maxRows?: number) => string>();
   private monitorTimer: ReturnType<typeof setInterval> | null = null;
 
   private rec(id: string) {
     let r = this.activity.get(id);
     if (!r) {
       r = {
-        lastByteAt: 0,
-        tail: "",
-        spell: false,
-        reviewPending: false,
-        alertedBlocked: false,
+        ...freshTurnMemo(),
+        frame: 0,
+        readFrame: -1, // never read → the first tick always looks
       };
       this.activity.set(id, r);
     }
     return r;
   }
 
-  /** Called from the terminal layer with each decoded chunk of PTY output. */
-  noteOutput(id: string, text: string) {
-    if (!text) return;
-    const rec = this.rec(id);
-    rec.lastByteAt = Date.now();
-    rec.tail = (rec.tail + stripAnsi(text)).slice(-TAIL_CAP);
+  /**
+   * A mounted terminal offers up its live screen. Until an agent is registered here it
+   * has no ground truth, and the monitor leaves its state (and roster position) alone
+   * rather than guessing — which is what keeps a dormant or slept agent looking exactly
+   * as the user left it.
+   */
+  registerScreen(id: string, read: (maxRows?: number) => string) {
+    this.screens.set(id, read);
+    this.ensureMonitor();
+  }
+
+  /** The terminal is going away (pane closed, agent slept). */
+  unregisterScreen(id: string) {
+    this.screens.delete(id);
+  }
+
+  /**
+   * Called once per chunk of PTY output, AFTER xterm has parsed it into the buffer (see
+   * createTerminal's write callback). So this means "the screen changed": it marks the
+   * agent as worth reading again, and nothing else — the screen itself is the state.
+   */
+  noteOutput(id: string) {
+    this.rec(id).frame++;
     this.ensureMonitor();
   }
 
   /**
-   * Called with each keystroke the user sends to a PTY. Kept only to make sure the
-   * monitor is running; "working" is derived from Claude's spinner, not keystrokes,
-   * so typing `claude`/`exit`/etc. never fabricates a turn.
+   * Called with each keystroke the user sends to a PTY. Keystrokes echo back as output
+   * anyway; this only guarantees the monitor is running, since "working" comes from
+   * Claude's status line and never from typing `claude`/`exit`/etc.
    */
   noteInput(id: string, _data: string) {
     void _data;
@@ -1702,109 +1861,75 @@ class AppState {
     }
   }
 
+  /** Commit a derived state, keeping the roster's recency key and disk in sync. */
+  private commitState(a: Agent, next: AgentState, now: number) {
+    if (a.state === next) return;
+    a.state = next;
+    a.stateChangedAt = now; // recency key for the sidebar's within-group sort
+    this.persist();
+  }
+
   private tickMonitor() {
     const now = Date.now();
     for (const a of this.agents) {
       if (a.archived) continue; // archived-with-workspace agents are inert
-      const rec = this.activity.get(a.id);
-      if (!rec) continue;
 
       // Only Claude agents have a working/blocked/done turn lifecycle. Shell and
       // custom agents (and any raw terminal noise) never drive status or sounds.
       if (a.kind !== "claude") {
-        const s: AgentState = a.status === "exited" ? "exited" : "idle";
-        if (a.state !== s) {
-          a.state = s;
-          a.stateChangedAt = now;
-        }
+        if (a.status === "exited") this.commitState(a, "exited", now);
+        else if (this.screens.has(a.id)) this.commitState(a, "idle", now);
         continue;
       }
+
       if (a.status === "exited") {
-        rec.spell = false;
-        rec.alertedBlocked = false;
-        if (a.state !== "exited") {
-          a.state = "exited";
-          a.stateChangedAt = now;
+        const rec = this.activity.get(a.id);
+        if (rec) {
+          rec.spell = false;
+          rec.reviewPending = false;
+          rec.alertedBlocked = false;
         }
+        this.commitState(a, "exited", now);
         continue;
       }
 
-      const idleFor = now - rec.lastByteAt;
-      // Claude's live spinner ("esc to interrupt") is the ground truth for "I'm
-      // processing a prompt". It only counts while output is actually flowing, so a
-      // stale phrase left in the scrollback can't pin an agent as working forever.
-      const spinnerLive =
-        idleFor < SPINNER_STALE_MS &&
-        SPINNER_MARKERS.some((re) => re.test(rec.tail.slice(-SPINNER_WINDOW)));
-      // Stay "working" through the brief gaps between the spinner's reprints and
-      // streaming bursts (when the phrase can momentarily scroll out of view).
-      const working = spinnerLive || (rec.spell && idleFor < WORKING_QUIET_MS);
+      // No mounted terminal ⇒ no ground truth. Leave the agent exactly as it is: a
+      // dormant (never opened this run) or slept agent must never be re-derived from
+      // guesswork, or reopening the app would shuffle the roster.
+      const read = this.screens.get(a.id);
+      if (!read) continue;
 
-      // Re-arm the blocked chime the moment Claude is genuinely working again — the
-      // LIVE spinner is showing, which a mere permission-prompt redraw never is. This
-      // is what lets the next distinct block chime while stopping the same block from
-      // chiming on every redraw.
-      if (spinnerLive) rec.alertedBlocked = false;
+      const rec = this.rec(a.id);
+      // Read only when there is something to read: the screen has changed since the last
+      // reading, or a reading is still waiting to settle. Deliberately NOT "output
+      // arrived in the last N seconds" — a hidden or minimised window has its timers
+      // throttled hard by the webview, and a tick that lands after such a window closed
+      // would skip the frame where the turn ended and lose the chime for good. Keyed on
+      // a change counter, a late tick still reads the very frame it missed.
+      if (rec.frame === rec.readFrame && !rec.pending) continue;
+      rec.readFrame = rec.frame;
 
-      const promptShowing = BLOCKED_MARKERS.some((re) => re.test(rec.tail.slice(-1200)));
-
-      let next: AgentState;
-      if (spinnerLive) {
-        // A live spinner is genuine work and always wins — this is how answering a
-        // prompt (which brings the spinner back) exits the blocked state.
-        next = "working";
-      } else if (a.state === "blocked" && promptShowing) {
-        // Already blocked and the prompt is still on screen → STAY blocked. A prompt
-        // redraw makes idleFor small, which the quiet-window rule below would otherwise
-        // read as "working" — flipping blocked→working→blocked, flickering the badge
-        // and replaying the chime on a loop. Holding here is what stops that.
-        next = "blocked";
-      } else if (working) {
-        next = "working";
-      } else if (rec.spell) {
-        // The spell just settled (600ms quiet, no spinner): waiting on the user if a
-        // prompt is up, otherwise finished. Entry into blocked stays conservative so a
-        // marker phrase appearing mid-response can't fire it early.
-        next = promptShowing ? "blocked" : "done";
-      } else {
-        // A finished turn stays "done" until the user clicks into its terminal
-        // (markReviewed). It is never auto-cleared on a timer.
-        next = rec.reviewPending ? "done" : "idle";
+      let raw: ScreenSignal;
+      try {
+        // The WHOLE visible screen, not just its last rows: Claude's status line and
+        // input box are bottom-anchored, but a permission dialog is drawn right after
+        // the transcript and can sit high up a tall pane with blank rows beneath it.
+        raw = readScreenSignal(read());
+      } catch {
+        continue; // terminal disposed mid-tick
       }
 
-      if (a.state !== next) {
-        if (next === "working") {
-          if (!rec.spell) {
-            // A genuine turn just started (spinner came up after user input).
-            rec.spell = true;
-            a.acknowledged = false;
-            a.lastUsedAt = now;
-            this.recordActivity("agent", a.id, a.name, "worked", a.workspaceId);
-          }
-        } else if (next === "blocked") {
-          // Chime ONCE per block (keep the spell so answering resumes work). The flag
-          // is cleared when work genuinely resumes or the turn ends, so it can't loop.
-          if (!rec.alertedBlocked) {
-            playBlocked();
-            rec.alertedBlocked = true;
-          }
-        } else if (next === "done") {
-          if (rec.spell) {
-            rec.reviewPending = true;
-            playDone();
-          }
-          rec.spell = false;
-          rec.alertedBlocked = false;
-          rec.tail = ""; // clear so a lingering spinner/prompt can't retrigger
-        } else {
-          rec.spell = false;
-          rec.alertedBlocked = false;
-          rec.tail = "";
-        }
-        a.state = next;
-        a.stateChangedAt = now; // recency key for the sidebar's within-group sort
-        this.persist();
+      // The turn state machine and its one-chime-per-event rules live in stepTurn, which
+      // is a pure reducer over `rec` precisely so those rules can be tested directly.
+      const step = stepTurn(rec, raw, now);
+      if (step.turnStarted) {
+        a.acknowledged = false;
+        a.lastUsedAt = now;
+        this.recordActivity("agent", a.id, a.name, "worked", a.workspaceId);
       }
+      if (step.chime === "blocked") playBlocked();
+      else if (step.chime === "done") playDone();
+      if (step.state) this.commitState(a, step.state, now);
     }
   }
 
@@ -1836,13 +1961,29 @@ class AppState {
     return agent.run;
   }
 
-  /** Called once a Claude agent's terminal has launched, so future opens resume it. */
-  markSessionStarted(id: string) {
+  /**
+   * Called once a Claude agent's terminal has launched, so future opens resume it.
+   * Captures the exact directory the session was created in so every later resume
+   * runs there (see {@link cwdOf}) — otherwise `claude --resume` (which is cwd-scoped)
+   * would find nothing and spawn an empty session.
+   */
+  markSessionStarted(id: string, cwd: string | null) {
     const a = this.agents.find((x) => x.id === id);
-    if (a && a.kind === "claude" && !a.sessionStarted) {
+    if (!a || a.kind !== "claude") return;
+    let changed = false;
+    if (!a.sessionStarted) {
       a.sessionStarted = true;
-      this.persist();
+      changed = true;
     }
+    // Pin the session's directory the first time we have one — including for agents
+    // started before this field existed, so they're protected from future cwd drift.
+    // (An already-drifted legacy agent's session is under its old path and can't be
+    // recovered regardless; pinning the current path never makes that worse.)
+    if (!a.sessionCwd && cwd?.trim()) {
+      a.sessionCwd = cwd;
+      changed = true;
+    }
+    if (changed) this.persist();
   }
 
   // ---------- settings ----------
@@ -1928,6 +2069,23 @@ class AppState {
 
   // ---------- persistence ----------
 
+  /**
+   * {@link tabLayouts} with orphaned entries dropped — groups no agent belongs to any
+   * more. Layouts are otherwise only deleted when {@link removeAgent} empties a group,
+   * so tabs emptied via the Done lane and groups of long-gone agents accumulated
+   * forever; layoutFor already ignores them at render time, so this is pure cleanup.
+   * Deliberately keyed on ALL agents (archived and done included) so an archived
+   * workspace's split arrangement still survives until its agents really go away.
+   */
+  private liveTabLayouts(): Record<string, LayoutNode> {
+    const groups = new Set(this.agents.map((a) => a.groupId));
+    const out: Record<string, LayoutNode> = {};
+    for (const [groupId, tree] of Object.entries(this.tabLayouts)) {
+      if (groups.has(groupId)) out[groupId] = tree;
+    }
+    return out;
+  }
+
   private snapshot() {
     return {
       version: 1,
@@ -1943,8 +2101,10 @@ class AppState {
         lane: a.lane,
         taskId: a.taskId,
         order: a.order,
+        laneOrder: a.laneOrder,
         sessionId: a.sessionId,
         sessionStarted: a.sessionStarted,
+        sessionCwd: a.sessionCwd,
         createdAt: a.createdAt,
         lastUsedAt: a.lastUsedAt,
         initialPrompt: a.initialPrompt,
@@ -1960,14 +2120,14 @@ class AppState {
       activeWorkspaceId: this.activeWorkspaceId,
       activeAgentByWs: this.activeAgentByWs,
       activeTabByWs: this.activeTabByWs,
-      tabLayouts: this.tabLayouts,
+      tabLayouts: this.liveTabLayouts(),
       defaultProjects: this.defaultProjects,
       terminalScrollPos: this.terminalScrollPos,
       shortcuts: this.shortcuts,
       pageViews: this.pageViews,
       notePreview: this.notePreview,
       lastNoteId: this.lastNoteId,
-      lastClosedAgentId: this.lastClosedAgentId,
+      lastClosed: this.lastClosed,
       sidebarWidth: this.sidebarWidth,
       workspacesRatio: this.workspacesRatio,
       notesListWidth: this.notesListWidth,
@@ -2023,21 +2183,28 @@ class AppState {
             // Migrate: task -> lane, add taskId
             lane: a.lane ?? legacyTask ?? "backlog",
             taskId: a.taskId ?? null,
+            // The Tasks board's own ordering key. Absent for agents never dragged on
+            // the board (and for every pre-existing state file) — those keep sorting
+            // by `order`, so the board looks exactly as it did. See Agent.laneOrder.
+            laneOrder: typeof a.laneOrder === "number" ? a.laneOrder : undefined,
             // Migrate: give every Claude agent a tracked session id so it resumes by id.
             // Legacy agents (no id) start a fresh tracked session going forward.
             sessionId: a.sessionId ?? (a.kind === "claude" ? crypto.randomUUID() : null),
             sessionStarted: a.sessionId ? (a.sessionStarted ?? false) : false,
+            // The directory the session was created in, so resume runs there (cwd-scoped).
+            sessionCwd: a.sessionCwd ?? null,
             createdAt: a.createdAt ?? Date.now(),
             lastUsedAt: a.lastUsedAt ?? a.createdAt ?? Date.now(),
             initialPrompt: a.initialPrompt ?? null,
             status: "idle" as RunStatus,
             exitCode: null,
-            // Restore the roster-ordering state so the agents reappear in the exact
-            // order they were left (blocked→done→working→idle, most-recent-first). The
-            // live PTY is respawned lazily; the monitor re-derives state from real
-            // output once the agent is opened. Legacy rows (no saved state) fall back
-            // to idle, keyed by lastUsedAt so their recency ordering is still sensible.
-            state: (a.state ?? "idle") as AgentState,
+            // Restore the roster-ordering state so the agents reappear in the order
+            // they were left (blocked→done→…, most-recent-first). Nothing is running
+            // yet, so a state that asserts live activity is dropped — see
+            // restoredState. The monitor re-derives the truth from the agent's real
+            // screen as soon as it is opened. Legacy rows (no saved state) fall back to
+            // idle, keyed by lastUsedAt so their recency ordering is still sensible.
+            state: restoredState(a.state),
             stateChangedAt: a.stateChangedAt ?? a.lastUsedAt ?? a.createdAt ?? Date.now(),
             acknowledged: a.acknowledged ?? true,
           };
@@ -2131,6 +2298,12 @@ class AppState {
         if (Array.isArray(data.shortcuts) && data.shortcuts.length > 0) {
           const savedMap = new Map((data.shortcuts as Shortcut[]).map(s => [s.id, s]));
           this.shortcuts = defaults.map(d => savedMap.get(d.id) || d);
+          // One-off migration: "Close Current Agent" shipped bound to "Delete", which
+          // the Mac delete key never reports (it sends "Backspace"), so the advertised
+          // ⌘⌫ could not fire. Saved copies of that dead binding are moved onto the
+          // working key; anything the user rebound themselves is left alone.
+          const closeAgent = this.shortcuts.find((s) => s.id === "close-current-agent");
+          if (closeAgent && closeAgent.key === "Delete") closeAgent.key = "Backspace";
         } else {
           this.shortcuts = defaults;
         }
@@ -2144,8 +2317,16 @@ class AppState {
         }
         // Load last-open note
         this.lastNoteId = typeof data.lastNoteId === "string" ? data.lastNoteId : null;
-        // Load last closed agent
-        this.lastClosedAgentId = typeof data.lastClosedAgentId === "string" ? data.lastClosedAgentId : null;
+        // Load the last closed agent so ⌘⇧Z still works after a restart. Older state
+        // files stored only `lastClosedAgentId`, which pointed at a deleted record and
+        // could never be reopened — those are simply dropped.
+        this.lastClosed =
+          data.lastClosed && typeof data.lastClosed === "object" && data.lastClosed.agent
+            ? {
+                agent: data.lastClosed.agent as Agent,
+                layout: (data.lastClosed.layout as LayoutNode | null) ?? null,
+              }
+            : null;
         // Load persisted layout sizes (with sane clamps).
         if (typeof data.sidebarWidth === "number")
           this.sidebarWidth = Math.max(180, Math.min(560, data.sidebarWidth));
@@ -2179,8 +2360,6 @@ class AppState {
             this.activeTabByWs[w.id] = focus?.groupId ?? this.tabGroups(w.id)[0]?.groupId ?? null;
           }
         }
-        // Keep counter ahead of restored ids to avoid collisions.
-        counter = this.workspaces.length + this.agents.length + this.tasks.length + 1;
       }
     } catch (e) {
       console.error("[Codesu] load_state failed", e);
@@ -2189,6 +2368,23 @@ class AppState {
     }
     // Begin reclaiming idle agents' processes (their sessions are preserved).
     this.ensureReaper();
+    // Flag workspaces whose folder has disappeared, so the sidebar says so instead of
+    // the user finding out when an agent refuses to start. Non-blocking.
+    void this.checkWorkspacePaths();
+    // Each Claude agent owns an isolated Claude config dir (that's what keeps its typed
+    // prompts out of its siblings' ↑ history — see TerminalPane.resolveEnv). Closing an
+    // agent leaves its directory behind, so the ones with no agent left are dropped here,
+    // once per launch. Purely housekeeping: failures are ignored.
+    //
+    // Skipped when nothing loaded: an empty agent list also means "state.json was missing
+    // or unreadable", and pruning against that would throw away the prompt history of
+    // every agent the user still has. Homes of long-dead agents simply wait for a launch
+    // that did load.
+    if (this.agents.length) {
+      void invoke("prune_claude_homes", {
+        liveAgentIds: this.agents.map((a) => a.id),
+      }).catch(() => {});
+    }
     // Save any migration (newly-assigned session ids) back to disk.
     this.persist();
   }

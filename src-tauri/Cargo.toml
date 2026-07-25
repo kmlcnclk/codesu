@@ -35,3 +35,19 @@ serde_json = "1"
 portable-pty = "0.9"
 libc = "0.2"
 
+# Shipping profile. Without it the bundled .app carries a debug-assertion-free but
+# otherwise unoptimized binary, several times larger than it needs to be.
+#
+# `panic = "abort"` only applies here: Cargo ignores the setting for the test and bench
+# profiles (they need unwinding for `#[should_panic]` and for reporting failures), so
+# `cargo test` — debug or release — is unaffected.
+[profile.release]
+codegen-units = 1  # one unit means LTO actually has the whole crate to work with
+lto = true
+opt-level = "s"    # size over raw speed; the hot path here is blocking pty I/O
+strip = true
+# NO `panic = "abort"`. A panic in a lock guard would otherwise take the whole process
+# down instantly, skipping RunEvent::ExitRequested — which is what runs kill_all(), so
+# every live `claude` child would be orphaned, and the frontend's flush-on-close would
+# never land either. Unwinding keeps that shutdown path reachable.
+
