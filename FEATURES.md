@@ -39,6 +39,46 @@ A detailed breakdown of what Codesu can do for you.
 
 ---
 
+## Code View
+
+The Code view (**Cmd + E**) is the "I don't want to leave the app" half of the workflow:
+read what the agent wrote, fix it by hand, and run it — without opening a separate IDE.
+
+### Built-in editor
+- **File tree** of the active workspace, loaded one level at a time (a huge
+  `node_modules` costs nothing until you expand it) with a "show hidden" toggle
+- **CodeMirror 6 editor** with syntax highlighting for JS/TS/JSX/TSX, JSON, CSS, HTML,
+  Svelte, Vue, Markdown, Rust, Python, Java/Kotlin and YAML — plus line numbers, code
+  folding, bracket matching and `Cmd + F` search
+- **Tabs** per open file, remembered per workspace across restarts (paths only — every
+  buffer is re-read from disk, so you never look at a stale copy)
+- **Cmd + S to save**, with an unsaved-changes dot on the tab
+- **Agent-aware**: a file an agent rewrote in the background is re-read when you focus
+  its tab, and a save is refused (offering *Reload* or *Overwrite*) if the file moved on
+  underneath an edit of yours
+- **Sandboxed**: every read and write is resolved against the workspace root and refused
+  if it lands outside it, symlinks included
+
+### Review
+- **Changes panel** — `git status` for the workspace, grouped by path with A/M/D/R/U
+  badges, the current branch, and ahead/behind counts
+- **Diff viewer** with real old/new line numbers, per-file and "all changes at once"
+- **Stage / unstage** a file straight from the list
+- **Auto-refresh** every few seconds while the view is open, so an agent's commits and
+  edits show up on their own
+- **Jump to edit**: open the file being reviewed in the editor in one click
+
+### Run
+- **Script discovery** — `package.json` scripts (run with the package manager the
+  lockfile implies), `Makefile` targets, Cargo, Gradle, Go, Python and the repo's shell
+  scripts, including sub-projects up to two levels deep
+- **Run panel** — a real shell per workspace, so scripts run with your environment,
+  accept input, and keep their scrollback; **Stop** sends `Ctrl-C`
+- **Ad-hoc commands**: type anything into the run bar
+- The panel is collapsible and resizable, and keeps running while you are in another view
+
+---
+
 ## Task & Project Management
 
 ### Kanban Board
@@ -109,6 +149,7 @@ Defaults (macOS). Every shortcut is rebindable in **Settings → Shortcuts**.
 
 ### View Navigation
 - **Cmd + A**: Agents
+- **Cmd + E**: Code
 - **Cmd + Y**: Tasks
 - **Cmd + N**: Notes
 - **Cmd + R**: Daily Report
@@ -138,6 +179,8 @@ shell or CLI running there, not by Codesu.*
 - **List & remove**: Manage a repo's worktrees straight from the app
 - **Branch Isolation**: Each worktree is its own directory on its own branch
 - **Git Commands**: Run any git command through agent terminals as usual
+- **Review in-app**: the Code view's Changes panel shows `git status` and diffs for the
+  active workspace, with staging — see [Code View](#code-view)
 
 ---
 

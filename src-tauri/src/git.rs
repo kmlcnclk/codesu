@@ -174,3 +174,166 @@ pub fn remove_worktree(
     let _ = git(repo, &["worktree", "prune"]);
     Ok(())
 }
+
+// ---------- Review: status & diffs ----------
+
+/// One path reported by `git status --porcelain=v1`.
+///
+/// `index` / `worktree` are the two raw status codes git prints (' ', 'M', 'A', 'D',
+/// 'R', '?', …). Keeping them verbatim lets the UI show exactly what git would, rather
+/// than collapsing "staged modification + unstaged modification" into one word.
+#[derive(Serialize, Clone, Debug)]
+pub struct FileChange {
+    pub path: String,
+    /// Absolute path on disk (worktree root + `path`). Empty for a deleted file.
+    pub abs_path: String,
+    pub index: String,
+    pub worktree: String,
+    pub staged: bool,
+    pub untracked: bool,
+    /// Original path of a rename, when git reported one.
+    pub orig_path: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct RepoStatus {
+    pub branch: Option<String>,
+    /// Commits ahead of / behind the upstream, when there is one.
+    pub ahead: u32,
+    pub behind: u32,
+    pub changes: Vec<FileChange>,
+}
+
+/// Absolute root of the working tree containing `repo`.
+fn worktree_root(repo: &str) -> Result<String, String> {
+    Ok(git(repo, &["rev-parse", "--show-toplevel"])?.trim().to_string())
+}
+
+/// Parse `git status --porcelain=v1 -z --branch` into a {@link RepoStatus}.
+///
+/// `-z` (NUL-separated, never quoted) is what makes a path with a space, a newline or a
+/// non-ASCII byte survive intact — the default output would escape and quote it, and the
+/// UI would then ask git to diff a path that does not exist. A rename record is two
+/// NUL-terminated fields in a row (new path, then old), so the iterator has to be able
+/// to pull an extra entry mid-loop.
+fn parse_status(root: &str, out: &str) -> RepoStatus {
+    let mut status = RepoStatus {
+        branch: None,
+        ahead: 0,
+        behind: 0,
+        changes: Vec::new(),
+    };
+    let mut it = out.split('\0').peekable();
+    while let Some(rec) = it.next() {
+        if rec.is_empty() {
+            continue;
+        }
+        // `## main...origin/main [ahead 1, behind 2]`
+        if let Some(head) = rec.strip_prefix("## ") {
+            let name = head.split(" [").next().unwrap_or(head);
+            let name = name.split("...").next().unwrap_or(name);
+            if !name.starts_with("HEAD (no branch)") {
+                status.branch = Some(name.trim().to_string());
+            }
+            if let Some(track) = head.split_once(" [").map(|(_, t)| t.trim_end_matches(']')) {
+                for part in track.split(", ") {
+                    if let Some(n) = part.strip_prefix("ahead ") {
+                        status.ahead = n.trim().parse().unwrap_or(0);
+                    } else if let Some(n) = part.strip_prefix("behind ") {
+                        status.behind = n.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            continue;
+        }
+        if rec.len() < 4 {
+            continue;
+        }
+        let mut chars = rec.chars();
+        let index = chars.next().unwrap_or(' ');
+        let worktree = chars.next().unwrap_or(' ');
+        let path = rec[3..].to_string();
+        // A rename/copy record is followed by its ORIGINAL path as the next NUL field.
+        let orig_path = if index == 'R' || index == 'C' || worktree == 'R' || worktree == 'C' {
+            it.next().map(|s| s.to_string()).filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        let untracked = index == '?' && worktree == '?';
+        let deleted = index == 'D' || worktree == 'D';
+        status.changes.push(FileChange {
+            abs_path: if deleted {
+                String::new()
+            } else {
+                Path::new(root).join(&path).to_string_lossy().to_string()
+            },
+            path,
+            index: index.to_string(),
+            worktree: worktree.to_string(),
+            staged: index != ' ' && index != '?',
+            untracked,
+            orig_path,
+        });
+    }
+    status.changes.sort_by(|a, b| a.path.cmp(&b.path));
+    status
+}
+
+/// Working-tree status of `repo` — the file list the review panel is built from.
+pub fn status(repo: &str) -> Result<RepoStatus, String> {
+    ensure_repo(repo)?;
+    let root = worktree_root(repo)?;
+    let out = git(repo, &["status", "--porcelain=v1", "-z", "--branch"])?;
+    Ok(parse_status(&root, &out))
+}
+
+/// Unified diff for one path.
+///
+/// `staged` picks the index-vs-HEAD diff instead of worktree-vs-index. An UNTRACKED file
+/// has no git-side counterpart at all, so it is diffed against `/dev/null` with
+/// `--no-index` (which exits 1 whenever there IS a difference — the normal case — so its
+/// non-zero status is not treated as failure).
+pub fn diff_file(repo: &str, path: &str, staged: bool, untracked: bool) -> Result<String, String> {
+    ensure_repo(repo)?;
+    if untracked {
+        let root = worktree_root(repo)?;
+        let abs = Path::new(&root).join(path);
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["diff", "--no-index", "--no-color", "--", "/dev/null"])
+            .arg(&abs)
+            .output()
+            .map_err(|e| format!("failed to run git: {e}"))?;
+        // `--no-index` exits 1 for "files differ", which is exactly what we asked for.
+        return Ok(String::from_utf8_lossy(&out.stdout).to_string());
+    }
+    let mut args = vec!["diff", "--no-color"];
+    if staged {
+        args.push("--cached");
+    }
+    args.push("--");
+    args.push(path);
+    git(repo, &args)
+}
+
+/// Diff of everything not yet committed (staged + unstaged), for a whole-branch read.
+pub fn diff_all(repo: &str, staged: bool) -> Result<String, String> {
+    ensure_repo(repo)?;
+    let mut args = vec!["diff", "--no-color"];
+    if staged {
+        args.push("--cached");
+    }
+    git(repo, &args)
+}
+
+/// Stage (`git add`) or unstage (`git restore --staged`) one path.
+pub fn stage_file(repo: &str, path: &str, staged: bool) -> Result<(), String> {
+    ensure_repo(repo)?;
+    if staged {
+        git(repo, &["add", "--", path])?;
+    } else {
+        git(repo, &["restore", "--staged", "--", path])?;
+    }
+    Ok(())
+}

@@ -75,6 +75,20 @@
     highlighter:
       "<path d='m9 11-6 6v3h9l3-3'/><path d='m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4'/>",
     eye: "<path d='M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z'/><circle cx='12' cy='12' r='3'/>",
+    // code view (editor / review / run)
+    code2:
+      "<path d='M8.5 7 4 12l4.5 5'/><path d='M15.5 7 20 12l-4.5 5'/><path d='M13.5 4.5 10.5 19.5'/>",
+    play: "<path d='M7 4.8v14.4a1 1 0 0 0 1.53.85l11.2-7.2a1 1 0 0 0 0-1.7L8.53 3.95A1 1 0 0 0 7 4.8Z'/>",
+    stop: "<rect x='5' y='5' width='14' height='14' rx='2.2'/>",
+    panelBottom:
+      "<rect x='3' y='4' width='18' height='16' rx='2.2'/><path d='M3 14h18'/>",
+    copy:
+      "<rect x='9' y='9' width='12' height='12' rx='2'/><path d='M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'/>",
+    square: "<rect x='4' y='4' width='16' height='16' rx='2.4'/>",
+    checkSquare:
+      "<rect x='4' y='4' width='16' height='16' rx='2.4'/><path d='m8.5 12 2.5 2.5 4.5-5'/>",
+    diff:
+      "<path d='M12 4v6'/><path d='M9 7h6'/><path d='M9 17h6'/><circle cx='12' cy='12' r='9'/>",
     // board / dashboard (Tasks "Board" view toggle)
     display:
       "<rect x='3' y='3' width='7' height='9' rx='1'/><rect x='14' y='3' width='7' height='5' rx='1'/><rect x='14' y='12' width='7' height='9' rx='1'/><rect x='3' y='16' width='7' height='5' rx='1'/>",

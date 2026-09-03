@@ -32,7 +32,16 @@ export interface Shortcut {
   shift: boolean;
   alt: boolean;
   meta: boolean;
-  context: "global" | "agents" | "tasks" | "notes" | "report" | "history" | "settings" | "terminal";
+  context:
+    | "global"
+    | "agents"
+    | "code"
+    | "tasks"
+    | "notes"
+    | "report"
+    | "history"
+    | "settings"
+    | "terminal";
   action: string;
 }
 
@@ -436,6 +445,146 @@ class AppState {
   /** Width (px) of the Notes page's note-list pane — user-resizable, persisted. */
   notesListWidth = $state(296);
 
+  // ---------- Code view (built-in editor / review / run) ----------
+  /**
+   * Files open in the Code view's editor, per workspace. Only the PATHS are persisted —
+   * the buffers themselves are re-read from disk on reopen, so the app never shows a
+   * stale copy of a file an agent has since rewritten.
+   */
+  codeOpenByWs = $state<Record<string, { paths: string[]; active: string | null }>>({});
+  /** Which panel the Code view's left rail shows: the file tree or the git changes. */
+  codeSideTab = $state<"files" | "changes">("files");
+  /** Width (px) of the Code view's left rail — user-resizable, persisted. */
+  codeTreeWidth = $state(260);
+  /** Height (px) of the Code view's run panel. Zero means collapsed. */
+  codeRunHeight = $state(0);
+  /** Show dotfiles in the Code view's file tree. */
+  codeShowHidden = $state(false);
+  /** Side-by-side (GitHub-style) vs. unified diff in the review pane. */
+  codeDiffSplit = $state(false);
+  /**
+   * Files ticked "Viewed" during review, per workspace: path → the signature the diff
+   * had when it was ticked.
+   *
+   * The signature is what makes the tick trustworthy. An agent rewriting a file you had
+   * already reviewed must un-tick it, and storing a plain boolean could not express
+   * that — see `diffSignature` in $lib/code/diff.
+   */
+  codeViewedByWs = $state<Record<string, Record<string, string>>>({});
+
+  /** Has `path` been reviewed at exactly this content? */
+  isCodeViewed(wsId: string, path: string, signature: string): boolean {
+    return this.codeViewedByWs[wsId]?.[path] === signature;
+  }
+
+  setCodeViewed(wsId: string, path: string, signature: string, viewed: boolean) {
+    const slot = (this.codeViewedByWs[wsId] ??= {});
+    if (viewed) slot[path] = signature;
+    else delete slot[path];
+    this.persist();
+  }
+
+  /**
+   * Drop ticks whose file has changed since it was reviewed.
+   *
+   * Called with the signatures of the diffs actually on screen. `isCodeViewed` already
+   * answers "no" for a stale entry, but the entry itself has to go too, or the changed-
+   * file list — which has no diff, and so no signature, to compare against — would keep
+   * showing the file as reviewed.
+   */
+  syncCodeViewed(wsId: string, signatures: Map<string, string>) {
+    const slot = this.codeViewedByWs[wsId];
+    if (!slot) return;
+    let changed = false;
+    for (const [path, sig] of signatures) {
+      if (slot[path] !== undefined && slot[path] !== sig) {
+        delete slot[path];
+        changed = true;
+      }
+    }
+    if (changed) this.persist();
+  }
+
+  /** Has `path` been reviewed at whatever version was last seen? (No diff needed.) */
+  hasCodeViewedEntry(wsId: string, path: string): boolean {
+    return this.codeViewedByWs[wsId]?.[path] !== undefined;
+  }
+
+  /** How many of `paths` are ticked as reviewed. */
+  codeViewedCount(wsId: string, paths: string[]): number {
+    const slot = this.codeViewedByWs[wsId];
+    if (!slot) return 0;
+    return paths.reduce((n, p) => n + (slot[p] !== undefined ? 1 : 0), 0);
+  }
+
+  /** Clear every tick for a workspace (the "start the review again" button). */
+  clearCodeViewed(wsId: string) {
+    this.codeViewedByWs[wsId] = {};
+    this.persist();
+  }
+
+  toggleCodeDiffSplit() {
+    this.codeDiffSplit = !this.codeDiffSplit;
+    this.persist();
+  }
+
+  /** The Code view's open-file record for `wsId`, created on first use. */
+  private codeSlot(wsId: string): { paths: string[]; active: string | null } {
+    let slot = this.codeOpenByWs[wsId];
+    if (!slot) {
+      slot = { paths: [], active: null };
+      this.codeOpenByWs[wsId] = slot;
+    }
+    return slot;
+  }
+
+  codeOpenPaths(wsId: string): string[] {
+    return this.codeOpenByWs[wsId]?.paths ?? [];
+  }
+
+  codeActivePath(wsId: string): string | null {
+    return this.codeOpenByWs[wsId]?.active ?? null;
+  }
+
+  /** Open (or focus, if already open) a file in the Code view's editor. */
+  openCodeFile(wsId: string, path: string) {
+    const slot = this.codeSlot(wsId);
+    if (!slot.paths.includes(path)) slot.paths = [...slot.paths, path];
+    slot.active = path;
+    this.persist();
+  }
+
+  /**
+   * Close one editor tab. The neighbour that takes focus is the tab to the LEFT (or the
+   * new last one), the same choice every editor makes — closing the file you just
+   * finished with should land you back on the one you came from.
+   */
+  closeCodeFile(wsId: string, path: string) {
+    const slot = this.codeSlot(wsId);
+    const i = slot.paths.indexOf(path);
+    if (i < 0) return;
+    slot.paths = slot.paths.filter((p) => p !== path);
+    if (slot.active === path) {
+      slot.active = slot.paths[Math.min(i, slot.paths.length - 1)] ?? null;
+    }
+    this.persist();
+  }
+
+  setActiveCodeFile(wsId: string, path: string | null) {
+    this.codeSlot(wsId).active = path;
+    this.persist();
+  }
+
+  /** Drop editor tabs for files that no longer exist (checked when the view opens). */
+  pruneCodeFiles(wsId: string, missing: string[]) {
+    if (!missing.length) return;
+    const slot = this.codeSlot(wsId);
+    const gone = new Set(missing);
+    slot.paths = slot.paths.filter((p) => !gone.has(p));
+    if (slot.active && gone.has(slot.active)) slot.active = slot.paths[0] ?? null;
+    this.persist();
+  }
+
   /**
    * Agents whose Claude/shell process the user has explicitly opened THIS run.
    * Session-scoped and deliberately NOT persisted: on a fresh launch it starts
@@ -491,6 +640,7 @@ class AppState {
       { id: "open-history", name: "Go to History", key: "h", ctrl: false, shift: false, alt: false, meta: true, context: "global", action: "navigate-history" },
       { id: "open-settings", name: "Go to Settings", key: "s", ctrl: false, shift: false, alt: false, meta: true, context: "global", action: "navigate-settings" },
       { id: "open-terminal", name: "Go to Terminal", key: "t", ctrl: false, shift: true, alt: false, meta: true, context: "global", action: "navigate-terminal" },
+      { id: "open-code", name: "Go to Code", key: "e", ctrl: false, shift: false, alt: false, meta: true, context: "global", action: "navigate-code" },
 
       // Agents page only
       { id: "new-claude-agent", name: "New Claude Agent", key: "t", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "new-claude-agent" },
@@ -2131,6 +2281,13 @@ class AppState {
       sidebarWidth: this.sidebarWidth,
       workspacesRatio: this.workspacesRatio,
       notesListWidth: this.notesListWidth,
+      codeOpenByWs: this.codeOpenByWs,
+      codeSideTab: this.codeSideTab,
+      codeTreeWidth: this.codeTreeWidth,
+      codeRunHeight: this.codeRunHeight,
+      codeShowHidden: this.codeShowHidden,
+      codeDiffSplit: this.codeDiffSplit,
+      codeViewedByWs: this.codeViewedByWs,
     };
   }
 
@@ -2334,6 +2491,41 @@ class AppState {
           this.workspacesRatio = Math.max(0.12, Math.min(0.85, data.workspacesRatio));
         if (typeof data.notesListWidth === "number")
           this.notesListWidth = Math.max(200, Math.min(560, data.notesListWidth));
+        // Code view: only the open-file PATHS are restored — each buffer is re-read from
+        // disk when its tab is shown, so a file rewritten while the app was closed is
+        // never presented as the version the user last saw.
+        if (data.codeOpenByWs && typeof data.codeOpenByWs === "object") {
+          const restored: Record<string, { paths: string[]; active: string | null }> = {};
+          for (const [wsId, slot] of Object.entries<any>(data.codeOpenByWs)) {
+            const paths = Array.isArray(slot?.paths)
+              ? slot.paths.filter((p: unknown) => typeof p === "string")
+              : [];
+            const active =
+              typeof slot?.active === "string" && paths.includes(slot.active)
+                ? slot.active
+                : (paths[0] ?? null);
+            restored[wsId] = { paths, active };
+          }
+          this.codeOpenByWs = restored;
+        }
+        if (data.codeSideTab === "files" || data.codeSideTab === "changes")
+          this.codeSideTab = data.codeSideTab;
+        if (typeof data.codeTreeWidth === "number")
+          this.codeTreeWidth = Math.max(160, Math.min(560, data.codeTreeWidth));
+        if (typeof data.codeRunHeight === "number")
+          this.codeRunHeight = Math.max(0, Math.min(900, data.codeRunHeight));
+        if (typeof data.codeShowHidden === "boolean") this.codeShowHidden = data.codeShowHidden;
+        if (typeof data.codeDiffSplit === "boolean") this.codeDiffSplit = data.codeDiffSplit;
+        if (data.codeViewedByWs && typeof data.codeViewedByWs === "object") {
+          const viewed: Record<string, Record<string, string>> = {};
+          for (const [wsId, slot] of Object.entries<any>(data.codeViewedByWs)) {
+            if (!slot || typeof slot !== "object") continue;
+            viewed[wsId] = Object.fromEntries(
+              Object.entries(slot).filter(([, sig]) => typeof sig === "string"),
+            ) as Record<string, string>;
+          }
+          this.codeViewedByWs = viewed;
+        }
         // Heal legacy `order` values: past releases could leave duplicates or gaps
         // (a new agent reused a removed sibling's slot), which made the tab and
         // workspace ordering shuffle on every reopen. Re-sequence to a dense, unique
