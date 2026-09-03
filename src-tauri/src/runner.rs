@@ -43,7 +43,7 @@ fn skip(name: &str) -> bool {
 /// The package manager a JS project uses, decided by its lockfile so the Run panel
 /// doesn't offer `npm run dev` in a pnpm workspace (which would build a second, divergent
 /// `node_modules`). Falls back to npm when there is no lockfile.
-fn js_runner(dir: &Path, root: &Path) -> &'static str {
+pub fn js_runner(dir: &Path, root: &Path) -> &'static str {
     for d in [dir, root] {
         if d.join("pnpm-lock.yaml").exists() {
             return "pnpm";
@@ -244,7 +244,7 @@ fn from_shell(out: &mut Vec<Script>, root: &Path, dir: &Path) {
 /// The command is typed into a real shell, so a path holding a space, `$` or `;` would
 /// otherwise be re-split (or executed). Only discovered paths pass through here — never
 /// user input — but a repo is allowed to contain a file called `a b;rm -rf c.sh`.
-fn shell_quote(s: &str) -> String {
+pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 

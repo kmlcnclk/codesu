@@ -128,6 +128,17 @@
     void send(script.command, script.cwd);
   }
 
+  /**
+   * Run a script the panel didn't discover — the editor's Run-gutter arrow.
+   *
+   * Goes through `run` so a test behaves like any other entry: it becomes the "Run again"
+   * target and names the picker button, which is what makes re-running the last test one
+   * click (or the Run panel's own shell history) away.
+   */
+  export function runScript(script: Script) {
+    run(script);
+  }
+
   function runCustom() {
     const line = custom.trim();
     if (!line) return;

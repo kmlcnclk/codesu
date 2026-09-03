@@ -3,17 +3,32 @@
   import Icon from "./Icon.svelte";
   import { readTextFile, writeTextFile, humanSize, relPath } from "$lib/code/api";
   import { languageFor, syntaxTheme } from "$lib/code/editor";
+  import { testGutter } from "$lib/code/testGutter";
+  import type { TestTarget } from "$lib/code/tests";
 
   let {
     root,
     path,
     onDirty,
+    onRunTest = null,
+    revealAt = null,
   }: {
     root: string;
     /** Absolute path of the file to show, or null for "no file open". */
     path: string | null;
     /** Reports which open files have unsaved edits, so the tab bar can dot them. */
     onDirty: (path: string, dirty: boolean) => void;
+    /**
+     * Called when a Run-gutter arrow (or ⌘⇧R) picks a test. Null leaves the gutter out
+     * entirely — nothing can run, so nothing offers to.
+     */
+    onRunTest?: ((target: TestTarget, path: string) => void) | null;
+    /**
+     * Scroll to a line and put the cursor there — a search hit being opened. `token`
+     * makes a repeat of the SAME hit reveal again (clicking it twice should re-centre,
+     * not do nothing).
+     */
+    revealAt?: { path: string; line: number; token: number } | null;
   } = $props();
 
   /** Per-file editor state, so switching tabs keeps undo history and cursor position. */
@@ -100,6 +115,9 @@
       ]),
       m.search.search({ top: true }),
       ...syntaxTheme,
+      // A ▶ beside every test in the file. Bound to `p`, not to the reactive `path`, so a
+      // buffer kept for a background tab keeps running ITS own file's tests.
+      ...(onRunTest ? testGutter(p, (target) => onRunTest(target, p)) : []),
       m.view.EditorView.updateListener.of((u: any) => {
         if (u.docChanged) {
           const buf = buffers.get(p);
@@ -179,7 +197,35 @@
     }
     shownPath = p;
     view.focus();
+    applyReveal();
   }
+
+  /** The last `revealAt.token` acted on, so one hit is never applied twice. */
+  let revealed = -1;
+
+  /**
+   * Centre the requested line, if the file it belongs to is the one on screen.
+   *
+   * Called from `show` (the file was just opened by the search) and from an effect (the
+   * file was already open, so no swap happens) — whichever comes second is the no-op.
+   */
+  function applyReveal() {
+    const r = revealAt;
+    if (!r || !view || !cm || shownPath !== r.path || r.token === revealed) return;
+    revealed = r.token;
+    const line = Math.max(1, Math.min(r.line, view.state.doc.lines));
+    const pos = view.state.doc.line(line).from;
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: cm.view.EditorView.scrollIntoView(pos, { y: "center" }),
+    });
+    view.focus();
+  }
+
+  $effect(() => {
+    revealAt;
+    untrack(applyReveal);
+  });
 
   /** Persist the current file. Returns false when the write was refused. */
   export async function save(force = false): Promise<boolean> {

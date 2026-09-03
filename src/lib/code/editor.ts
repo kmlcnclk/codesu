@@ -16,9 +16,9 @@ import { tags as t } from "@lezer/highlight";
  */
 export const codesuTheme = EditorView.theme(
   {
-    "&": { color: "#e9eef6", backgroundColor: "#0a0c11", height: "100%" },
+    "&": { color: "#bcbec4", backgroundColor: "#131416", height: "100%" },
     ".cm-content": {
-      caretColor: "#6e8bff",
+      caretColor: "#ced0d6",
       fontFamily:
         'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Code", monospace',
       fontSize: "13px",
@@ -26,41 +26,56 @@ export const codesuTheme = EditorView.theme(
     },
     ".cm-scroller": { lineHeight: "1.55", overflow: "auto" },
     "&.cm-focused": { outline: "none" },
-    ".cm-cursor, .cm-dropCursor": { borderLeftColor: "#6e8bff", borderLeftWidth: "2px" },
+    ".cm-cursor, .cm-dropCursor": { borderLeftColor: "#ced0d6", borderLeftWidth: "2px" },
     "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
-      { backgroundColor: "#2b3566" },
+      { backgroundColor: "#214283" },
     ".cm-gutters": {
-      backgroundColor: "#0a0c11",
-      color: "#3f4859",
+      backgroundColor: "#131416",
+      color: "#4b5059",
       border: "none",
-      borderRight: "1px solid #141a24",
+      // No rule between gutter and text, like the IDE — the line numbers' own left
+      // margin is the separation.
+      borderRight: "1px solid #131416",
     },
-    ".cm-activeLine": { backgroundColor: "rgba(110, 139, 255, 0.055)" },
-    ".cm-activeLineGutter": { backgroundColor: "transparent", color: "#7c8799" },
-    ".cm-selectionMatch": { backgroundColor: "rgba(110, 139, 255, 0.18)" },
+    ".cm-activeLine": { backgroundColor: "#1c1d20" },
+    // The Run gutter (see `testGutter`). Dim until hovered, so a file full of tests reads
+    // as code rather than as a column of green arrows.
+    ".cm-test-gutter": { width: "16px" },
+    ".cm-test-run": {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      height: "100%",
+      color: "#59a869",
+      opacity: "0.62",
+      cursor: "pointer",
+    },
+    ".cm-test-run:hover": { opacity: "1", transform: "scale(1.18)" },
+    ".cm-activeLineGutter": { backgroundColor: "#1c1d20", color: "#a1a3ab" },
+    ".cm-selectionMatch": { backgroundColor: "#3a4a5c" },
     ".cm-matchingBracket, &.cm-focused .cm-matchingBracket": {
-      backgroundColor: "rgba(110, 139, 255, 0.22)",
+      backgroundColor: "#3b514d",
       outline: "none",
     },
-    ".cm-searchMatch": { backgroundColor: "rgba(227, 179, 65, 0.28)" },
-    ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "rgba(227, 179, 65, 0.5)" },
-    ".cm-panels": { backgroundColor: "#11151e", color: "#b0bccc", borderColor: "#1b2230" },
+    ".cm-searchMatch": { backgroundColor: "#32593d" },
+    ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "#155a26" },
+    ".cm-panels": { backgroundColor: "#1c1d20", color: "#dfe1e5", borderColor: "#2b2d31" },
     ".cm-panels input, .cm-panels button": {
-      background: "#161b26",
-      color: "#e9eef6",
-      border: "1px solid #29313f",
+      background: "#131416",
+      color: "#dfe1e5",
+      border: "1px solid #3c3f45",
       borderRadius: "5px",
       padding: "2px 6px",
     },
     ".cm-tooltip": {
-      backgroundColor: "#141a27",
-      border: "1px solid #29313f",
+      backgroundColor: "#212226",
+      border: "1px solid #2b2d31",
       borderRadius: "7px",
     },
     ".cm-foldPlaceholder": {
-      backgroundColor: "#1d2431",
+      backgroundColor: "#313338",
       border: "none",
-      color: "#7c8799",
+      color: "#9da0a8",
       padding: "0 6px",
       borderRadius: "4px",
     },
@@ -68,24 +83,32 @@ export const codesuTheme = EditorView.theme(
   { dark: true },
 );
 
-/** Token colours — one hue family per role so the palette stays legible, not festive. */
+/**
+ * Token colours, taken from IntelliJ IDEA's "New UI" dark scheme so a file reads the same
+ * here as it does in the IDE next to it: keywords orange, strings green, numbers cyan,
+ * declarations blue, fields violet, and plain identifiers left at the editor foreground
+ * rather than tinted. Restraint is the point — the IDE colours what carries meaning and
+ * leaves the rest alone.
+ */
 export const codesuHighlight = HighlightStyle.define([
-  { tag: [t.comment, t.lineComment, t.blockComment], color: "#566072", fontStyle: "italic" },
-  { tag: [t.keyword, t.modifier, t.controlKeyword, t.operatorKeyword], color: "#c07af7" },
-  { tag: [t.string, t.special(t.string), t.regexp], color: "#7fd88f" },
-  { tag: [t.number, t.bool, t.null, t.atom], color: "#f0883e" },
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "#8aa1ff" },
-  { tag: [t.definition(t.variableName), t.definition(t.propertyName)], color: "#e9eef6" },
-  { tag: [t.propertyName, t.attributeName], color: "#39c5cf" },
-  { tag: [t.typeName, t.className, t.namespace], color: "#e3b341" },
-  { tag: [t.tagName], color: "#ff7b72" },
-  { tag: [t.operator, t.punctuation, t.separator, t.bracket], color: "#8b98a9" },
-  { tag: [t.variableName], color: "#e9eef6" },
-  { tag: [t.heading], color: "#8aa1ff", fontWeight: "700" },
-  { tag: [t.link, t.url], color: "#39c5cf", textDecoration: "underline" },
+  { tag: [t.comment, t.lineComment, t.blockComment], color: "#7a7e85" },
+  { tag: [t.keyword, t.modifier, t.controlKeyword, t.operatorKeyword], color: "#cf8e6d" },
+  { tag: [t.string, t.special(t.string)], color: "#6aab73" },
+  { tag: [t.regexp, t.escape], color: "#2aacb8" },
+  { tag: [t.number, t.bool, t.null, t.atom], color: "#2aacb8" },
+  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "#56a8f5" },
+  { tag: [t.definition(t.variableName), t.definition(t.propertyName)], color: "#bcbec4" },
+  { tag: [t.propertyName, t.attributeName], color: "#c77dbb" },
+  { tag: [t.annotation, t.meta], color: "#b3ae60" },
+  { tag: [t.typeName, t.className, t.namespace], color: "#bcbec4" },
+  { tag: [t.tagName], color: "#e8bf6a" },
+  { tag: [t.operator, t.punctuation, t.separator, t.bracket], color: "#bcbec4" },
+  { tag: [t.variableName], color: "#bcbec4" },
+  { tag: [t.heading], color: "#56a8f5", fontWeight: "700" },
+  { tag: [t.link, t.url], color: "#548af7", textDecoration: "underline" },
   { tag: [t.emphasis], fontStyle: "italic" },
   { tag: [t.strong], fontWeight: "700" },
-  { tag: [t.invalid], color: "#ff6b6b" },
+  { tag: [t.invalid], color: "#f75464" },
 ]);
 
 export const syntaxTheme = [codesuTheme, syntaxHighlighting(codesuHighlight)];

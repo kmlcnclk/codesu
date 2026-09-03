@@ -1,23 +1,29 @@
 <script lang="ts">
   import { SvelteSet } from "svelte/reactivity";
-  import { untrack } from "svelte";
+  import { tick, untrack } from "svelte";
   import { app } from "$lib/store/app.svelte";
   import Icon from "./Icon.svelte";
   import FileTree from "./FileTree.svelte";
   import CodeEditor from "./CodeEditor.svelte";
   import DiffView from "./DiffView.svelte";
   import RunPanel from "./RunPanel.svelte";
+  import SearchPalette from "./SearchPalette.svelte";
   import {
     gitStatus,
     gitDiffFile,
     gitDiffAll,
     gitStageFile,
     isGitRepo,
+    resolveTestCommand,
+    invalidateSearchIndex,
+    warmSearchIndex,
     changeBadge,
     baseName,
     type FileChange,
     type RepoStatus,
+    type Script,
   } from "$lib/code/api";
+  import type { TestTarget } from "$lib/code/tests";
 
   const ws = $derived(app.activeWorkspace);
   const root = $derived(ws?.path ?? "");
@@ -58,6 +64,68 @@
     forget: (path: string) => void;
     isDirty: (path: string) => boolean;
   } | null>(null);
+
+  // ---------- search ----------
+  /** The search palette's mode while it is open, or null when it is closed. */
+  let searchMode = $state<"file" | "symbol" | "text" | null>(null);
+  /** The line a search hit asked the editor to scroll to (see CodeEditor's `revealAt`). */
+  let revealAt = $state<{ path: string; line: number; token: number } | null>(null);
+  let revealToken = 0;
+
+  /** Open a search hit: its file, and the line it was found on. */
+  function openHit(path: string, line: number) {
+    openFile(path);
+    revealAt = line > 0 ? { path, line, token: ++revealToken } : null;
+  }
+
+  /** The Run panel's handle, for running a test the editor's gutter picked. */
+  let runPanel = $state<{ runScript: (script: Script) => void } | null>(null);
+  /** Why the last gutter click couldn't run (no build tool found, unknown language). */
+  let testError = $state<string | null>(null);
+
+  /**
+   * Run one test from the editor gutter — the ▶ next to a `@Test`, or ⌘⇧R.
+   *
+   * Saves first, because every runner here compiles from DISK: running the arrow next to a
+   * method you just edited and watching the old code pass is the one outcome that would
+   * make the feature untrustworthy. Then the Run panel is opened (it is where the output,
+   * the input and Ctrl-C live) and handed the resolved command.
+   */
+  async function runTest(target: TestTarget, path: string) {
+    if (!ws) return;
+    testError = null;
+    if (dirtyPaths.has(path) && !(await editor?.save())) return; // conflict bar has it
+    let script: Script;
+    try {
+      script = await resolveTestCommand(root, path, target);
+    } catch (e) {
+      testError = String(e);
+      return;
+    }
+    const panel = await openRunPanel();
+    if (!panel) {
+      testError = "The Run panel did not open.";
+      return;
+    }
+    panel.runScript(script);
+  }
+
+  /**
+   * Show the Run panel and wait for it to actually exist.
+   *
+   * It is rendered only while it has a height, so opening it and calling into it in the
+   * same tick would find nothing bound. A few frames of grace covers the mount; the guard
+   * is a bounded loop rather than a fixed delay so the common case (already open) is
+   * instant.
+   */
+  async function openRunPanel() {
+    if (app.codeRunHeight <= 0) {
+      app.codeRunHeight = 300;
+      app.persist();
+    }
+    for (let i = 0; i < 30 && !runPanel; i++) await tick();
+    return runPanel;
+  }
 
   function onDirty(path: string, dirty: boolean) {
     if (dirty) dirtyPaths.add(path);
@@ -202,6 +270,9 @@
   function refreshAll() {
     treeToken++;
     void refreshStatus();
+    // The search index is otherwise trusted for a few seconds; the refresh button is the
+    // user saying the tree changed, so a search right after it must see the change.
+    if (root) void invalidateSearchIndex(root).catch(() => {});
   }
 
   // ---------- visibility ----------
@@ -231,6 +302,8 @@
       visible = now;
       if (now) {
         void refreshStatus();
+        // Fire-and-forget: a failure here only means the first search pays for the walk.
+        void warmSearchIndex(r).catch(() => {});
         timer = setInterval(() => void refreshStatus(), 5000);
       } else {
         stopPoll();
@@ -246,6 +319,37 @@
       observer.disconnect();
       stopPoll();
     };
+  });
+
+  /**
+   * ⌘P / ⌘⇧O / ⌘⇧F open the palette on files, symbols or text.
+   *
+   * Registered in the CAPTURE phase, and here rather than with the app's other global
+   * shortcuts, for the same reason: the focus is usually inside CodeMirror, which is
+   * `contenteditable` — the global handler deliberately ignores editable targets, and
+   * CodeMirror's own keymap would otherwise swallow the chord first.
+   */
+  $effect(() => {
+    const el = pageEl;
+    if (!el) return;
+    const onKeydown = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || !isShown()) return;
+      const key = e.key.toLowerCase();
+      const mode =
+        key === "p" && !e.shiftKey
+          ? "file"
+          : key === "o" && e.shiftKey
+            ? "symbol"
+            : key === "f" && e.shiftKey
+              ? "text"
+              : null;
+      if (!mode) return;
+      e.preventDefault();
+      e.stopPropagation();
+      searchMode = mode;
+    };
+    window.addEventListener("keydown", onKeydown, true);
+    return () => window.removeEventListener("keydown", onKeydown, true);
   });
 
   // ---------- resizing ----------
@@ -316,6 +420,12 @@
           <Icon name="diff" size={13} /> Changes
           {#if status?.changes.length}<span class="count">{status.changes.length}</span>{/if}
         </button>
+        <button
+          class="rail-search"
+          title="Search files, symbols and text (⌘P)"
+          aria-label="Search workspace"
+          onclick={() => (searchMode = "file")}><Icon name="search" size={13} /></button
+        >
       </div>
 
       {#if app.codeSideTab === "files"}
@@ -485,6 +595,16 @@
         >
       </div>
 
+      {#if testError}
+        <div class="test-err">
+          <Icon name="alert" size={13} />
+          <span>{testError}</span>
+          <button title="Dismiss" onclick={() => (testError = null)}
+            ><Icon name="close" size={11} /></button
+          >
+        </div>
+      {/if}
+
       <div class="stack">
         <div class="pane" style:display={mode === "diff" ? "flex" : "none"}>
           <DiffView
@@ -501,7 +621,14 @@
           />
         </div>
         <div class="pane" style:display={mode === "edit" ? "flex" : "none"}>
-          <CodeEditor bind:this={editor} {root} path={activePath} {onDirty} />
+          <CodeEditor
+            bind:this={editor}
+            {root}
+            path={activePath}
+            {onDirty}
+            onRunTest={runTest}
+            {revealAt}
+          />
         </div>
       </div>
 
@@ -514,10 +641,19 @@
           onpointerdown={dragRun}
         ></div>
         <div class="run" style:height="{app.codeRunHeight}px">
-          <RunPanel workspaceId={ws.id} {root} />
+          <RunPanel bind:this={runPanel} workspaceId={ws.id} {root} />
         </div>
       {/if}
     </div>
+  {/if}
+
+  {#if searchMode && root}
+    <SearchPalette
+      {root}
+      requestedMode={searchMode}
+      onOpen={openHit}
+      onClose={() => (searchMode = null)}
+    />
   {/if}
 </div>
 
@@ -791,6 +927,38 @@
   }
 
   /* ---- gutters ---- */
+  .test-err {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 10px;
+    font-size: 11.5px;
+    color: var(--danger);
+    background: var(--danger-bg);
+    border-bottom: 1px solid var(--border);
+  }
+  .test-err span {
+    flex: 1;
+    min-width: 0;
+  }
+  .test-err button {
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    padding: 2px;
+  }
+
+  .rail-search {
+    flex: 0 0 auto !important;
+    padding: 0 8px !important;
+    color: var(--text-faint) !important;
+  }
+  .rail-search:hover {
+    color: var(--accent-bright) !important;
+  }
+
   .gutter-v {
     width: 4px;
     cursor: col-resize;

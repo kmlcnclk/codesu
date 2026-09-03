@@ -4,11 +4,15 @@ mod fsx;
 mod git;
 mod pty;
 mod runner;
+mod search;
 mod store;
+mod testing;
 
 use fsx::{DirEntry, FileContent};
 use git::{RepoStatus, Worktree};
 use runner::Script;
+use search::Hit;
+use testing::TestTarget;
 use pty::PtyManager;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -139,6 +143,42 @@ fn git_stage_file(repo: String, path: String, staged: bool) -> Result<(), String
 #[tauri::command(async)]
 fn discover_scripts(root: String) -> Result<Vec<Script>, String> {
     runner::discover(&root)
+}
+
+/// The command that runs one test — what the editor's Run-gutter arrow clicks.
+///
+/// The UI finds the tests in the buffer it already has; this resolves the build tool,
+/// sub-project and package manager off disk and hands back a `Script` the Run panel types
+/// into its shell, exactly like a discovered one.
+#[tauri::command(async)]
+fn resolve_test_command(root: String, file: String, target: TestTarget) -> Result<Script, String> {
+    testing::resolve(&root, &file, &target)
+}
+
+// ---------- Search commands ----------
+
+/// Search the workspace for `query`: `kind` is "file" (by name/path), "symbol" (by
+/// declaration) or "text" (a grep). Results come back ranked, best first.
+#[tauri::command(async)]
+fn search_workspace(
+    root: String,
+    query: String,
+    kind: String,
+    limit: Option<usize>,
+) -> Result<Vec<Hit>, String> {
+    search::search(&root, &query, &kind, limit.unwrap_or(60))
+}
+
+/// Build the search index up front (called when the Code view opens).
+#[tauri::command(async)]
+fn warm_search_index(root: String) {
+    search::warm(&root)
+}
+
+/// Drop the cached search index for a workspace (the file tree's refresh button).
+#[tauri::command(async)]
+fn invalidate_search_index(root: String) {
+    search::invalidate(&root)
 }
 
 // ---------- Built-in editor filesystem commands ----------
@@ -297,6 +337,10 @@ pub fn run() {
             git_diff_all,
             git_stage_file,
             discover_scripts,
+            resolve_test_command,
+            search_workspace,
+            warm_search_index,
+            invalidate_search_index,
             list_dir,
             read_text_file,
             write_text_file,

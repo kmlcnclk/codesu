@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { TestTarget } from "./tests";
 
 /** One entry of a directory listing (mirrors `fsx::DirEntry`). */
 export interface DirEntry {
@@ -104,6 +105,52 @@ export const gitStageFile = (repo: string, path: string, staged: boolean): Promi
 
 export const discoverScripts = async (root: string): Promise<Script[]> =>
   camel(await invoke("discover_scripts", { root }));
+
+/**
+ * The command that runs one test, resolved from the build tool on disk (Gradle module,
+ * pytest node id, `vitest -t`, …). Returns a `Script` the Run panel treats exactly like a
+ * discovered one.
+ */
+export const resolveTestCommand = async (
+  root: string,
+  file: string,
+  target: TestTarget,
+): Promise<Script> => camel(await invoke("resolve_test_command", { root, file, target }));
+
+/** One search result (mirrors `search::Hit`). */
+export interface SearchHit {
+  /** "file" | "symbol" | "text" — which question this answers. */
+  kind: string;
+  path: string;
+  /** Path relative to the workspace, for display. */
+  rel: string;
+  /** File name, symbol name, or the matched line's text. */
+  name: string;
+  /** Symbol keyword ("fun", "class"), or the containing directory for a file hit. */
+  detail: string;
+  /** 1-based line to jump to; 0 for a file hit. */
+  line: number;
+  score: number;
+}
+
+/** Search the workspace. Results come back ranked, best first. */
+export const searchWorkspace = async (
+  root: string,
+  query: string,
+  kind: "file" | "symbol" | "text",
+  limit = 60,
+): Promise<SearchHit[]> => camel(await invoke("search_workspace", { root, query, kind, limit }));
+
+/**
+ * Build the search index up front. Called when the Code view opens, so the first
+ * keystroke in the palette answers from memory rather than from a walk of the tree.
+ */
+export const warmSearchIndex = (root: string): Promise<void> =>
+  invoke("warm_search_index", { root });
+
+/** Force the next search to re-walk the tree (the file tree's refresh button). */
+export const invalidateSearchIndex = (root: string): Promise<void> =>
+  invoke("invalidate_search_index", { root });
 
 export const isGitRepo = (path: string): Promise<boolean> =>
   invoke("is_git_repo", { path });
