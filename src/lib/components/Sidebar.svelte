@@ -14,7 +14,13 @@
   let {
     onNewWorkspace,
     onNewAgent,
-  }: { onNewWorkspace: () => void; onNewAgent: (workspaceId: string) => void } = $props();
+    onOpenCode,
+  }: {
+    onNewWorkspace: () => void;
+    onNewAgent: (workspaceId: string) => void;
+    /** Open this workspace in the built-in Code view. */
+    onOpenCode?: (workspaceId: string) => void;
+  } = $props();
 
   let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
@@ -75,7 +81,8 @@
       x: e.clientX,
       y: e.clientY,
       items: [
-        { label: "Rename workspace", onSelect: () => startRenameWs(ws) },
+        { label: "Open in Codesu editor", onSelect: () => onOpenCode?.(ws.id) },
+        { label: "Rename workspace", separatorBefore: true, onSelect: () => startRenameWs(ws) },
         { label: "New Claude agent", color: "var(--accent)", separatorBefore: true, onSelect: () => app.addAgent({ workspaceId: ws.id, kind: "claude", run: "claude" }) },
         { label: "New agent…", onSelect: () => onNewAgent(ws.id) },
         { label: "Archive workspace", danger: true, separatorBefore: true, onSelect: () => app.archiveWorkspace(ws.id) },

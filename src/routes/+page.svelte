@@ -8,6 +8,7 @@
   import Sidebar from "$lib/components/Sidebar.svelte";
   import TabBar from "$lib/components/TabBar.svelte";
   import TerminalArea from "$lib/components/TerminalArea.svelte";
+  import CodePage from "$lib/components/CodePage.svelte";
   import NewAgentDialog from "$lib/components/NewAgentDialog.svelte";
   import NewWorkspaceDialog from "$lib/components/NewWorkspaceDialog.svelte";
   import TasksPage from "$lib/components/TasksPage.svelte";
@@ -19,7 +20,15 @@
   import Icon from "$lib/components/Icon.svelte";
   import { setMuted, installAudioUnlock } from "$lib/sound";
 
-  type View = "agents" | "tasks" | "notes" | "report" | "history" | "settings" | "terminal";
+  type View =
+    | "agents"
+    | "code"
+    | "tasks"
+    | "notes"
+    | "report"
+    | "history"
+    | "settings"
+    | "terminal";
   let view = $state<View>("agents");
 
   let showNewWorkspace = $state(false);
@@ -136,6 +145,8 @@
       // Navigation actions
       if (shortcut.action === "navigate-agents") {
         view = "agents";
+      } else if (shortcut.action === "navigate-code") {
+        view = "code";
       } else if (shortcut.action === "navigate-tasks") {
         view = "tasks";
       } else if (shortcut.action === "navigate-notes") {
@@ -186,6 +197,8 @@
 
   // Brand logos for the dropdown items.
   const VSCODE_LOGO = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="#0098FF" d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/></svg>`;
+  // Codesu's own mark — the same glyph as the Code nav item.
+  const CODESU_LOGO = `<svg viewBox="0 0 24 24" fill="none" stroke="#8aa1ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M8.5 7 4 12l4.5 5"/><path d="M15.5 7 20 12l-4.5 5"/><path d="M13.5 4.5 10.5 19.5"/></svg>`;
   // Official IntelliJ IDEA icon (Wikimedia Commons).
   const INTELLIJ_LOGO = `<svg viewBox="0 0 70 70" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><linearGradient id="ijeaG1" gradientUnits="userSpaceOnUse" x1="0.7898" y1="40.0893" x2="33.3172" y2="40.0893"><stop offset="0.2581" stop-color="#F97A12"/><stop offset="0.4591" stop-color="#B07B58"/><stop offset="0.7241" stop-color="#577BAE"/><stop offset="0.9105" stop-color="#1E7CE5"/><stop offset="1" stop-color="#087CFA"/></linearGradient><polygon fill="url(#ijeaG1)" points="17.7,54.6 0.8,41.2 9.2,25.6 33.3,35"/><linearGradient id="ijeaG2" gradientUnits="userSpaceOnUse" x1="25.7674" y1="24.88" x2="79.424" y2="54.57"><stop offset="0" stop-color="#F97A12"/><stop offset="0.0718" stop-color="#CB7A3E"/><stop offset="0.1541" stop-color="#9E7B6A"/><stop offset="0.242" stop-color="#757B91"/><stop offset="0.3344" stop-color="#537BB1"/><stop offset="0.4324" stop-color="#387CCC"/><stop offset="0.5381" stop-color="#237CE0"/><stop offset="0.6552" stop-color="#147CEF"/><stop offset="0.7925" stop-color="#0B7CF7"/><stop offset="1" stop-color="#087CFA"/></linearGradient><polygon fill="url(#ijeaG2)" points="70,18.7 68.7,59.2 41.8,70 25.6,59.6 49.3,35 38.9,12.3 48.2,1.1"/><linearGradient id="ijeaG3" gradientUnits="userSpaceOnUse" x1="63.2277" y1="42.9153" x2="48.2903" y2="-1.7191"><stop offset="0" stop-color="#FE315D"/><stop offset="0.0784" stop-color="#CB417E"/><stop offset="0.1601" stop-color="#9E4E9B"/><stop offset="0.2474" stop-color="#755BB4"/><stop offset="0.3392" stop-color="#5365CA"/><stop offset="0.4365" stop-color="#386DDB"/><stop offset="0.5414" stop-color="#2374E9"/><stop offset="0.6576" stop-color="#1478F3"/><stop offset="0.794" stop-color="#0B7BF8"/><stop offset="1" stop-color="#087CFA"/></linearGradient><polygon fill="url(#ijeaG3)" points="70,18.7 48.7,43.9 38.9,12.3 48.2,1.1"/><linearGradient id="ijeaG4" gradientUnits="userSpaceOnUse" x1="10.7204" y1="16.473" x2="55.5237" y2="90.58"><stop offset="0" stop-color="#FE315D"/><stop offset="0.0402" stop-color="#F63462"/><stop offset="0.1037" stop-color="#DF3A71"/><stop offset="0.1667" stop-color="#C24383"/><stop offset="0.2912" stop-color="#AD4A91"/><stop offset="0.5498" stop-color="#755BB4"/><stop offset="0.9175" stop-color="#1D76ED"/><stop offset="1" stop-color="#087CFA"/></linearGradient><polygon fill="url(#ijeaG4)" points="33.7,58.1 5.6,68.3 10.1,52.5 16,33.1 0,27.7 10.1,0 32.1,2.7 53.7,27.4"/><rect x="13.7" y="13.5" fill="#000000" width="43.2" height="43.2"/><rect x="17.7" y="48.6" fill="#FFFFFF" width="16.2" height="2.7"/><polygon fill="#FFFFFF" points="29.4,22.4 29.4,19.1 20.4,19.1 20.4,22.4 23,22.4 23,33.7 20.4,33.7 20.4,37 29.4,37 29.4,33.7 26.9,33.7 26.9,22.4"/><path fill="#FFFFFF" d="M38,37.3c-1.4,0-2.6-0.3-3.5-0.8c-0.9-0.5-1.7-1.2-2.3-1.9l2.5-2.8c0.5,0.6,1,1,1.5,1.3c0.5,0.3,1.1,0.5,1.7,0.5c0.7,0,1.3-0.2,1.8-0.7c0.4-0.5,0.6-1.2,0.6-2.3V19.1h4v11.7c0,1.1-0.1,2-0.4,2.8c-0.3,0.8-0.7,1.4-1.3,2c-0.5,0.5-1.2,1-2,1.2C39.8,37.1,39,37.3,38,37.3"/></svg>`;
 
@@ -202,16 +215,51 @@
     }
   }
 
+  /**
+   * Workspace picker on the titlebar chip.
+   *
+   * This is the only way to change workspace in the Code view, which has no sidebar —
+   * so it lists every live workspace, with its accent dot, and offers the new-workspace
+   * dialog at the bottom.
+   */
+  function showWorkspaceMenu(e: MouseEvent) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const items: MenuItem[] = app.liveWorkspaces.map((w) => ({
+      label: w.name,
+      color: w.color,
+      checked: w.id === app.activeWorkspaceId,
+      onSelect: () => app.setActiveWorkspace(w.id),
+    }));
+    items.push({
+      label: "New workspace…",
+      separatorBefore: true,
+      onSelect: () => (showNewWorkspace = true),
+    });
+    editorMenu = { x: Math.min(r.left, window.innerWidth - 240), y: r.bottom + 4, items };
+  }
+
   function showEditorMenu(e: MouseEvent) {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     editorMenu = {
       x: Math.min(r.left, window.innerWidth - 210),
       y: r.bottom + 4,
       items: [
-        { label: "Open in VS Code", iconSvg: VSCODE_LOGO, onSelect: () => openInEditor("vscode") },
+        { label: "Open in Codesu", iconSvg: CODESU_LOGO, onSelect: () => (view = "code") },
+        {
+          label: "Open in VS Code",
+          iconSvg: VSCODE_LOGO,
+          separatorBefore: true,
+          onSelect: () => openInEditor("vscode"),
+        },
         { label: "Open in IntelliJ IDEA", iconSvg: INTELLIJ_LOGO, onSelect: () => openInEditor("intellij") },
       ],
     };
+  }
+
+  /** Switch a workspace into the Code view (from the sidebar's context menu). */
+  function openCodeFromSidebar(workspaceId: string) {
+    app.setActiveWorkspace(workspaceId);
+    view = "code";
   }
 
   function openNewAgent(workspaceId: string) {
@@ -230,6 +278,9 @@
     <nav class="nav" aria-label="Views">
       <button class="nav-btn" class:on={view === "agents"} onclick={() => (view = "agents")} title="Agents">
         <Icon name="agents" size={15} /><span class="nav-lbl">Agents</span>
+      </button>
+      <button class="nav-btn" class:on={view === "code"} onclick={() => (view = "code")} title="Code (⌘E)">
+        <Icon name="code2" size={15} /><span class="nav-lbl">Code</span>
       </button>
       <button class="nav-btn" class:on={view === "tasks"} onclick={() => (view = "tasks")} title="Tasks">
         <Icon name="tasks" size={15} /><span class="nav-lbl">Tasks</span>
@@ -267,12 +318,20 @@
       aria-label="Toggle agent sounds"
       onclick={toggleMute}
     ><Icon name={muted ? "volumeMute" : "volume"} size={15} /></button>
-    {#if view === "agents" && app.activeWorkspace}
+    {#if (view === "agents" || view === "code") && app.activeWorkspace}
       <span class="crumbs">
-        <span class="ws-chip" style="--accent:{app.activeWorkspace.color}">
+        <button
+          class="ws-chip"
+          style="--accent:{app.activeWorkspace.color}"
+          title="Switch workspace"
+          onclick={showWorkspaceMenu}
+        >
           <span class="d"></span>{app.activeWorkspace.name}
-        </span>
-        {#if app.activeAgent}<span class="arrow">›</span><span class="ag">{app.activeAgent.name}</span>{/if}
+          <Icon name="chevronDown" size={12} />
+        </button>
+        {#if view === "agents" && app.activeAgent}<span class="arrow">›</span><span class="ag"
+            >{app.activeAgent.name}</span
+          >{/if}
       </span>
       <button class="open-editor" title="Open workspace in an editor" onclick={showEditorMenu}>
         <Icon name="open" size={14} /><span class="oe-lbl">Open in editor</span>
@@ -282,9 +341,17 @@
   </header>
 
   <div class="body">
-    <!-- The workspace/agent rail belongs to the Agents view only. -->
+    <!--
+      The workspace/agent rail belongs to the Agents view only. The Code view already
+      spends its width on a file tree and a diff, and hands workspace switching to the
+      titlebar chip instead (see `showWorkspaceMenu`).
+    -->
     {#if view === "agents"}
-      <Sidebar onNewWorkspace={() => (showNewWorkspace = true)} onNewAgent={openNewAgent} />
+      <Sidebar
+        onNewWorkspace={() => (showNewWorkspace = true)}
+        onNewAgent={openNewAgent}
+        onOpenCode={openCodeFromSidebar}
+      />
     {/if}
     <div class="main">
       <!--
@@ -296,6 +363,13 @@
           <TabBar onNewAgent={newAgentForActive} />
         {/if}
         <TerminalArea />
+      </div>
+      <!--
+        Like the Agents view, the Code view stays mounted (hidden) so its run shell keeps
+        running — and its scrollback survives — while the user is looking elsewhere.
+      -->
+      <div style:display={view === "code" ? "flex" : "none"} style:flex="1" style:min-height="0">
+        <CodePage />
       </div>
       <!--
         System terminal also stays mounted (hidden) to preserve PTY state and buffer.
@@ -491,10 +565,20 @@
     align-items: center;
     gap: 5px;
     color: var(--text-secondary);
-    padding: 2px 8px;
+    font-size: 12px;
+    font-family: inherit;
+    padding: 3px 7px 3px 8px;
     background: var(--surface-3);
+    border: 1px solid transparent;
     border-radius: 5px;
     white-space: nowrap;
+    cursor: pointer;
+    transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+  }
+  .ws-chip:hover {
+    background: var(--surface-4);
+    border-color: var(--border-strong);
+    color: var(--text);
   }
   .ws-chip .d {
     width: 7px;

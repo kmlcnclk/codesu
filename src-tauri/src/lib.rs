@@ -1,10 +1,14 @@
 mod claude_home;
 mod editor;
+mod fsx;
 mod git;
 mod pty;
+mod runner;
 mod store;
 
-use git::Worktree;
+use fsx::{DirEntry, FileContent};
+use git::{RepoStatus, Worktree};
+use runner::Script;
 use pty::PtyManager;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -94,6 +98,72 @@ fn is_git_repo(path: String) -> bool {
 #[tauri::command(async)]
 fn dir_exists(path: String) -> bool {
     !path.trim().is_empty() && std::path::Path::new(path.trim()).is_dir()
+}
+
+// ---------- Review (git status / diff) commands ----------
+
+/// Working-tree status of `repo` — the changed-file list the review panel shows.
+#[tauri::command(async)]
+fn git_status(repo: String) -> Result<RepoStatus, String> {
+    git::status(&repo)
+}
+
+/// Unified diff for one path (`staged` reads the index, `untracked` diffs against
+/// /dev/null — see `git::diff_file`).
+#[tauri::command(async)]
+fn git_diff_file(
+    repo: String,
+    path: String,
+    staged: bool,
+    untracked: bool,
+) -> Result<String, String> {
+    git::diff_file(&repo, &path, staged, untracked)
+}
+
+/// Diff of every tracked change at once.
+#[tauri::command(async)]
+fn git_diff_all(repo: String, staged: bool) -> Result<String, String> {
+    git::diff_all(&repo, staged)
+}
+
+/// Stage or unstage one path.
+#[tauri::command(async)]
+fn git_stage_file(repo: String, path: String, staged: bool) -> Result<(), String> {
+    git::stage_file(&repo, &path, staged)
+}
+
+// ---------- Run commands ----------
+
+/// Every command the workspace can run (package.json scripts, make targets, …).
+/// Discovery only — the chosen script is executed by the UI through a normal PTY.
+#[tauri::command(async)]
+fn discover_scripts(root: String) -> Result<Vec<Script>, String> {
+    runner::discover(&root)
+}
+
+// ---------- Built-in editor filesystem commands ----------
+
+/// One directory level inside the workspace (the file tree loads lazily).
+#[tauri::command(async)]
+fn list_dir(root: String, path: String) -> Result<Vec<DirEntry>, String> {
+    fsx::list_dir(&root, &path)
+}
+
+/// Read a workspace file into the editor.
+#[tauri::command(async)]
+fn read_text_file(root: String, path: String) -> Result<FileContent, String> {
+    fsx::read_text_file(&root, &path)
+}
+
+/// Save an edited buffer back to disk, refusing if the file changed underneath it.
+#[tauri::command(async)]
+fn write_text_file(
+    root: String,
+    path: String,
+    content: String,
+    expect_modified_ms: Option<u64>,
+) -> Result<u64, String> {
+    fsx::write_text_file(&root, &path, &content, expect_modified_ms)
 }
 
 // ---------- Persistence commands ----------
@@ -222,6 +292,14 @@ pub fn run() {
             claude_agent_env,
             prune_claude_homes,
             open_in_editor,
+            git_status,
+            git_diff_file,
+            git_diff_all,
+            git_stage_file,
+            discover_scripts,
+            list_dir,
+            read_text_file,
+            write_text_file,
             allow_asset
         ])
         .build(tauri::generate_context!())
