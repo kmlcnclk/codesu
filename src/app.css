@@ -9,46 +9,80 @@
 :root {
   color-scheme: dark;
 
-  /* ---- Surfaces (layered depth, cool navy-black) ---- */
-  --bg: #090b10; /* app base — deepest */
-  --surface-1: #0d1017; /* titlebar, sidebar */
-  --surface-2: #11151e; /* tabbar, secondary panels */
-  --surface-3: #161b26; /* hover / raised */
-  --surface-4: #1d2431; /* active / pressed */
-  --surface-float: #141a27; /* menus, modals, popovers */
-  --term-bg: #0a0c11; /* terminal canvas */
+  /*
+   * ---- Surfaces (IntelliJ IDEA "New UI" dark) ----
+   *
+   * Two planes, warm-neutral rather than blue-black: the CANVAS a file or a terminal
+   * lives on and the CHROME around it — tool windows, the titlebar, the tab strip. That
+   * one step is what makes an IDE readable at a glance; everything else here is
+   * hover/pressed states climbing off the chrome plane.
+   *
+   * The hue family is IntelliJ IDEA's "New UI" dark (neutral grey, not blue), sitting one
+   * notch below the IDE's own #1e1f22 / #2b2d30 — the same relationships, less light.
+   *
+   * The previous ramp started at #090b10, near black. It looked striking empty, but this
+   * app frames other people's colours — a terminal, a diff, syntax highlighting — and
+   * against near-black those glare while the app's own panels lose their edges.
+   */
+  --bg: #16171a; /* app base — the canvas plane */
+  --surface-1: #1c1d20; /* titlebar, sidebar, tool windows */
+  --surface-2: #1f2023; /* tabbar, secondary panels */
+  --surface-3: #26282c; /* hover / raised */
+  --surface-4: #313338; /* active / pressed */
+  --surface-float: #212226; /* menus, modals, popovers */
+  --term-bg: #131416; /* terminal / editor canvas — inset below the base */
 
   /* ---- Borders ---- */
-  --border: #1b2230; /* default hairline */
-  --border-strong: #29313f; /* emphasized / interactive edges */
-  --border-muted: #141a24; /* faint internal dividers */
+  --border: #2b2d31; /* default hairline */
+  --border-strong: #3c3f45; /* emphasized / interactive edges */
+  --border-muted: #232427; /* faint internal dividers */
 
   /* ---- Text ramp ---- */
-  --text: #e9eef6;
-  --text-secondary: #b0bccc;
-  --text-muted: #7c8799;
-  --text-faint: #566072;
-  --text-ghost: #3f4859;
+  --text: #dfe1e5; /* UI labels */
+  --text-secondary: #bcbec4; /* editor foreground */
+  --text-muted: #9da0a8;
+  --text-faint: #7a7e85; /* comment grey */
+  --text-ghost: #5a5d63;
 
-  /* ---- Accent (indigo-violet) ---- */
-  --accent: #6e8bff;
-  --accent-bright: #8aa1ff;
-  --accent-dim: #5872e6;
+  /* ---- Accent (IntelliJ blue) ---- */
+  --accent: #3574f0;
+  --accent-bright: #548af7;
+  --accent-dim: #2a5fcc;
   --accent-fg: #ffffff;
-  --accent-soft: rgba(110, 139, 255, 0.14);
-  --accent-softer: rgba(110, 139, 255, 0.08);
-  --accent-line: rgba(110, 139, 255, 0.55);
-  --accent-glow: rgba(110, 139, 255, 0.35);
+  --accent-soft: rgba(53, 116, 240, 0.22); /* over --surface-1 ≈ the IDE's #2e436e row */
+  --accent-softer: rgba(53, 116, 240, 0.12);
+  --accent-line: rgba(53, 116, 240, 0.6);
+  --accent-glow: rgba(53, 116, 240, 0.4);
+
+  /*
+   * ---- Hues ----
+   *
+   * A small, fixed palette for identity rather than state: which view you are in, which
+   * search mode is active, which workspace a row belongs to. All at one lightness so no
+   * single hue shouts over the others, and all readable on --surface-1 (≥4.5:1).
+   *
+   * Status colours below are separate on purpose — green/amber/red have to keep MEANING
+   * (done / attention / failed), which they lose the moment they are also decoration.
+   */
+  --hue-blue: #6ea8fe;
+  --hue-violet: #b48ef7;
+  --hue-teal: #4fc4c0;
+  --hue-amber: #e8b04b;
+  --hue-rose: #f3809b;
+  --hue-lime: #96c95f;
+  --hue-cyan: #57bde0;
+  /* Ink for text sitting ON a hue (a filled badge, a chip). Every hue clears 7:1 with it. */
+  --on-hue: #16171a;
 
   /* ---- Status ---- */
-  --ok: #3fb950;
-  --ok-glow: rgba(63, 185, 80, 0.5);
-  --warn: #e3b341;
-  --danger: #ff6b6b;
-  --danger-strong: #ff5f57;
-  --danger-bg: rgba(255, 107, 107, 0.12);
-  --danger-line: rgba(255, 107, 107, 0.28);
-  --danger-glow: rgba(255, 95, 87, 0.55);
+  --ok: #59a869; /* the IDE's run green */
+  --ok-glow: rgba(89, 168, 105, 0.5);
+  --warn: #f2c55c;
+  --danger: #e55765;
+  --danger-strong: #f75464;
+  --danger-bg: rgba(247, 84, 100, 0.14);
+  --danger-line: rgba(247, 84, 100, 0.32);
+  --danger-glow: rgba(247, 84, 100, 0.55);
 
   /* ---- Radii ---- */
   --r-xs: 5px;
@@ -58,10 +92,10 @@
   --r-xl: 16px;
 
   /* ---- Shadows ---- */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55);
-  --shadow-xl: 0 28px 70px rgba(0, 0, 0, 0.6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.34);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.46);
+  --shadow-xl: 0 28px 70px rgba(0, 0, 0, 0.52);
   --ring: 0 0 0 2px var(--accent-glow);
 
   /* ---- Motion ---- */

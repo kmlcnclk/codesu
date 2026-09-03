@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { app } from "$lib/store/app.svelte";
   import ContextMenu, { type MenuItem } from "$lib/components/ContextMenu.svelte";
@@ -30,6 +29,46 @@
     | "settings"
     | "terminal";
   let view = $state<View>("agents");
+
+  /**
+   * The nav, as data.
+   *
+   * Each view carries its own hue: the icon wears it always and the active tab fills with
+   * it, so "where am I" is answered by colour before the label is read. Seven identical
+   * grey chips could not do that. Kept as a list rather than seven near-identical buttons
+   * so a new view is one row, not a copy-paste.
+   */
+  const NAV: {
+    view: View;
+    label: string;
+    icon: string;
+    hue: string;
+    title: string;
+    badge?: () => number;
+    mutedBadge?: boolean;
+  }[] = [
+    { view: "agents", label: "Agents", icon: "agents", hue: "--hue-blue", title: "Agents (⌘A)" },
+    {
+      view: "tasks",
+      label: "Tasks",
+      icon: "tasks",
+      hue: "--hue-amber",
+      title: "Tasks (⌘Y)",
+      badge: () => app.openTaskCount,
+    },
+    {
+      view: "notes",
+      label: "Notes",
+      icon: "notes",
+      hue: "--hue-lime",
+      title: "Notes (⌘N)",
+      badge: () => app.ideaList.length,
+      mutedBadge: true,
+    },
+    { view: "report", label: "Report", icon: "clipboard", hue: "--hue-violet", title: "Daily Report (⌘R)" },
+    { view: "history", label: "History", icon: "archive", hue: "--hue-cyan", title: "History (⌘H)" },
+    { view: "settings", label: "Settings", icon: "settings", hue: "--hue-rose", title: "Settings (⌘S)" },
+  ];
 
   let showNewWorkspace = $state(false);
   let newAgentWs = $state<string | null>(null);
@@ -146,7 +185,7 @@
       if (shortcut.action === "navigate-agents") {
         view = "agents";
       } else if (shortcut.action === "navigate-code") {
-        view = "code";
+        toggleCode();
       } else if (shortcut.action === "navigate-tasks") {
         view = "tasks";
       } else if (shortcut.action === "navigate-notes") {
@@ -192,28 +231,8 @@
     }
   }
 
-  // "Open in editor" dropdown (Agents view only).
-  let editorMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
-
-  // Brand logos for the dropdown items.
-  const VSCODE_LOGO = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="#0098FF" d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/></svg>`;
-  // Codesu's own mark — the same glyph as the Code nav item.
-  const CODESU_LOGO = `<svg viewBox="0 0 24 24" fill="none" stroke="#8aa1ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M8.5 7 4 12l4.5 5"/><path d="M15.5 7 20 12l-4.5 5"/><path d="M13.5 4.5 10.5 19.5"/></svg>`;
-  // Official IntelliJ IDEA icon (Wikimedia Commons).
-  const INTELLIJ_LOGO = `<svg viewBox="0 0 70 70" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><linearGradient id="ijeaG1" gradientUnits="userSpaceOnUse" x1="0.7898" y1="40.0893" x2="33.3172" y2="40.0893"><stop offset="0.2581" stop-color="#F97A12"/><stop offset="0.4591" stop-color="#B07B58"/><stop offset="0.7241" stop-color="#577BAE"/><stop offset="0.9105" stop-color="#1E7CE5"/><stop offset="1" stop-color="#087CFA"/></linearGradient><polygon fill="url(#ijeaG1)" points="17.7,54.6 0.8,41.2 9.2,25.6 33.3,35"/><linearGradient id="ijeaG2" gradientUnits="userSpaceOnUse" x1="25.7674" y1="24.88" x2="79.424" y2="54.57"><stop offset="0" stop-color="#F97A12"/><stop offset="0.0718" stop-color="#CB7A3E"/><stop offset="0.1541" stop-color="#9E7B6A"/><stop offset="0.242" stop-color="#757B91"/><stop offset="0.3344" stop-color="#537BB1"/><stop offset="0.4324" stop-color="#387CCC"/><stop offset="0.5381" stop-color="#237CE0"/><stop offset="0.6552" stop-color="#147CEF"/><stop offset="0.7925" stop-color="#0B7CF7"/><stop offset="1" stop-color="#087CFA"/></linearGradient><polygon fill="url(#ijeaG2)" points="70,18.7 68.7,59.2 41.8,70 25.6,59.6 49.3,35 38.9,12.3 48.2,1.1"/><linearGradient id="ijeaG3" gradientUnits="userSpaceOnUse" x1="63.2277" y1="42.9153" x2="48.2903" y2="-1.7191"><stop offset="0" stop-color="#FE315D"/><stop offset="0.0784" stop-color="#CB417E"/><stop offset="0.1601" stop-color="#9E4E9B"/><stop offset="0.2474" stop-color="#755BB4"/><stop offset="0.3392" stop-color="#5365CA"/><stop offset="0.4365" stop-color="#386DDB"/><stop offset="0.5414" stop-color="#2374E9"/><stop offset="0.6576" stop-color="#1478F3"/><stop offset="0.794" stop-color="#0B7BF8"/><stop offset="1" stop-color="#087CFA"/></linearGradient><polygon fill="url(#ijeaG3)" points="70,18.7 48.7,43.9 38.9,12.3 48.2,1.1"/><linearGradient id="ijeaG4" gradientUnits="userSpaceOnUse" x1="10.7204" y1="16.473" x2="55.5237" y2="90.58"><stop offset="0" stop-color="#FE315D"/><stop offset="0.0402" stop-color="#F63462"/><stop offset="0.1037" stop-color="#DF3A71"/><stop offset="0.1667" stop-color="#C24383"/><stop offset="0.2912" stop-color="#AD4A91"/><stop offset="0.5498" stop-color="#755BB4"/><stop offset="0.9175" stop-color="#1D76ED"/><stop offset="1" stop-color="#087CFA"/></linearGradient><polygon fill="url(#ijeaG4)" points="33.7,58.1 5.6,68.3 10.1,52.5 16,33.1 0,27.7 10.1,0 32.1,2.7 53.7,27.4"/><rect x="13.7" y="13.5" fill="#000000" width="43.2" height="43.2"/><rect x="17.7" y="48.6" fill="#FFFFFF" width="16.2" height="2.7"/><polygon fill="#FFFFFF" points="29.4,22.4 29.4,19.1 20.4,19.1 20.4,22.4 23,22.4 23,33.7 20.4,33.7 20.4,37 29.4,37 29.4,33.7 26.9,33.7 26.9,22.4"/><path fill="#FFFFFF" d="M38,37.3c-1.4,0-2.6-0.3-3.5-0.8c-0.9-0.5-1.7-1.2-2.3-1.9l2.5-2.8c0.5,0.6,1,1,1.5,1.3c0.5,0.3,1.1,0.5,1.7,0.5c0.7,0,1.3-0.2,1.8-0.7c0.4-0.5,0.6-1.2,0.6-2.3V19.1h4v11.7c0,1.1-0.1,2-0.4,2.8c-0.3,0.8-0.7,1.4-1.3,2c-0.5,0.5-1.2,1-2,1.2C39.8,37.1,39,37.3,38,37.3"/></svg>`;
-
-  async function openInEditor(editor: "vscode" | "intellij") {
-    const ws = app.activeWorkspace;
-    if (!ws) return;
-    try {
-      await invoke("open_in_editor", { path: ws.path, editor });
-    } catch (e) {
-      console.error("[Codesu] open_in_editor failed", e);
-      alert(
-        `Couldn't open ${editor === "vscode" ? "VS Code" : "IntelliJ IDEA"}.\n\n${e}`,
-      );
-    }
-  }
+  /** Popover menu (the workspace picker) — position plus its items, or null when closed. */
+  let popupMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
   /**
    * Workspace picker on the titlebar chip.
@@ -235,31 +254,34 @@
       separatorBefore: true,
       onSelect: () => (showNewWorkspace = true),
     });
-    editorMenu = { x: Math.min(r.left, window.innerWidth - 240), y: r.bottom + 4, items };
+    popupMenu = { x: Math.min(r.left, window.innerWidth - 240), y: r.bottom + 4, items };
   }
 
-  function showEditorMenu(e: MouseEvent) {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    editorMenu = {
-      x: Math.min(r.left, window.innerWidth - 210),
-      y: r.bottom + 4,
-      items: [
-        { label: "Open in Codesu", iconSvg: CODESU_LOGO, onSelect: () => (view = "code") },
-        {
-          label: "Open in VS Code",
-          iconSvg: VSCODE_LOGO,
-          separatorBefore: true,
-          onSelect: () => openInEditor("vscode"),
-        },
-        { label: "Open in IntelliJ IDEA", iconSvg: INTELLIJ_LOGO, onSelect: () => openInEditor("intellij") },
-      ],
-    };
+  /**
+   * The view to come back to when Code is toggled off.
+   *
+   * Code takes over the whole window, so leaving it is a "go back", not a "go to Agents":
+   * toggling out of it from the Tasks board should land on the Tasks board. Never holds
+   * "code" itself, or the button would toggle onto itself.
+   */
+  let viewBeforeCode = $state<View>("agents");
+
+  /** Enter the Code view, remembering where from. */
+  function enterCode() {
+    if (view !== "code") viewBeforeCode = view;
+    view = "code";
+  }
+
+  /** The titlebar Code button and ⌘E: in when out, back where you were when in. */
+  function toggleCode() {
+    if (view === "code") view = viewBeforeCode;
+    else enterCode();
   }
 
   /** Switch a workspace into the Code view (from the sidebar's context menu). */
   function openCodeFromSidebar(workspaceId: string) {
     app.setActiveWorkspace(workspaceId);
-    view = "code";
+    enterCode();
   }
 
   function openNewAgent(workspaceId: string) {
@@ -276,29 +298,18 @@
     <span class="brand">Codesu</span>
 
     <nav class="nav" aria-label="Views">
-      <button class="nav-btn" class:on={view === "agents"} onclick={() => (view = "agents")} title="Agents">
-        <Icon name="agents" size={15} /><span class="nav-lbl">Agents</span>
-      </button>
-      <button class="nav-btn" class:on={view === "code"} onclick={() => (view = "code")} title="Code (⌘E)">
-        <Icon name="code2" size={15} /><span class="nav-lbl">Code</span>
-      </button>
-      <button class="nav-btn" class:on={view === "tasks"} onclick={() => (view = "tasks")} title="Tasks">
-        <Icon name="tasks" size={15} /><span class="nav-lbl">Tasks</span>
-        {#if app.openTaskCount > 0}<span class="nav-badge">{app.openTaskCount}</span>{/if}
-      </button>
-      <button class="nav-btn" class:on={view === "notes"} onclick={() => (view = "notes")} title="Notes">
-        <Icon name="notes" size={15} /><span class="nav-lbl">Notes</span>
-        {#if app.ideaList.length > 0}<span class="nav-badge muted">{app.ideaList.length}</span>{/if}
-      </button>
-      <button class="nav-btn" class:on={view === "report"} onclick={() => (view = "report")} title="Daily Report (⌘R)">
-        <Icon name="clipboard" size={15} /><span class="nav-lbl">Report</span>
-      </button>
-      <button class="nav-btn" class:on={view === "history"} onclick={() => (view = "history")} title="History (⌘H)">
-        <Icon name="archive" size={15} /><span class="nav-lbl">History</span>
-      </button>
-      <button class="nav-btn" class:on={view === "settings"} onclick={() => (view = "settings")} title="Settings (⌘,)">
-        <Icon name="settings" size={15} /><span class="nav-lbl">Settings</span>
-      </button>
+      {#each NAV as item (item.view)}
+        <button
+          class="nav-btn"
+          class:on={view === item.view}
+          style:--hue="var({item.hue})"
+          onclick={() => (view = item.view)}
+          title={item.title}
+        >
+          <Icon name={item.icon} size={15} /><span class="nav-lbl">{item.label}</span>
+          {#if item.badge?.()}<span class="nav-badge" class:muted={item.mutedBadge}>{item.badge()}</span>{/if}
+        </button>
+      {/each}
     </nav>
 
     <button
@@ -333,11 +344,22 @@
             >{app.activeAgent.name}</span
           >{/if}
       </span>
-      <button class="open-editor" title="Open workspace in an editor" onclick={showEditorMenu}>
-        <Icon name="open" size={14} /><span class="oe-lbl">Open in editor</span>
-        <Icon name="chevronDown" size={13} />
-      </button>
     {/if}
+    <!--
+      Code sits here, at the end of the titlebar, rather than in the nav group: it is the
+      only view that takes over the whole window (no agent rail), so it reads as a mode
+      you enter next to the workspace it applies to — not as one tab among seven.
+      Outside the `{#if}` above, because it must stay reachable from every view.
+    -->
+    <button
+      class="code-btn"
+      class:on={view === "code"}
+      aria-pressed={view === "code"}
+      title={view === "code" ? "Close Code (⌘E)" : "Code (⌘E)"}
+      onclick={toggleCode}
+    >
+      <Icon name="code2" size={14} /><span class="cb-lbl">Code</span>
+    </button>
   </header>
 
   <div class="body">
@@ -407,8 +429,8 @@
 {#if newAgentWs}
   <NewAgentDialog workspaceId={newAgentWs} onClose={() => (newAgentWs = null)} />
 {/if}
-{#if editorMenu}
-  <ContextMenu x={editorMenu.x} y={editorMenu.y} items={editorMenu.items} onClose={() => (editorMenu = null)} />
+{#if popupMenu}
+  <ContextMenu x={popupMenu.x} y={popupMenu.y} items={popupMenu.items} onClose={() => (popupMenu = null)} />
 {/if}
 
 <style>
@@ -482,14 +504,27 @@
     cursor: pointer;
     transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
   }
+  /* The icon carries the view's hue even when the tab is idle — dimmed, so a row of
+     seven reads as a palette rather than as a fairground. */
+  .nav-btn :global(svg) {
+    color: var(--hue);
+    opacity: 0.62;
+    transition: opacity var(--t-fast);
+  }
   .nav-btn:hover {
     color: var(--text-secondary);
     background: var(--surface-3);
   }
+  .nav-btn:hover :global(svg) {
+    opacity: 0.9;
+  }
   .nav-btn.on {
-    background: var(--accent-soft);
-    color: var(--accent-bright);
-    box-shadow: inset 0 0 0 1px var(--accent-softer);
+    background: color-mix(in srgb, var(--hue) 16%, transparent);
+    color: var(--hue);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hue) 30%, transparent);
+  }
+  .nav-btn.on :global(svg) {
+    opacity: 1;
   }
   .nav-badge {
     min-width: 16px;
@@ -498,8 +533,8 @@
     display: grid;
     place-items: center;
     border-radius: 8px;
-    background: var(--accent);
-    color: var(--accent-fg);
+    background: var(--hue, var(--accent));
+    color: var(--on-hue);
     font-size: 10px;
     font-weight: 800;
   }
@@ -597,7 +632,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .open-editor {
+  .code-btn {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -613,9 +648,15 @@
     cursor: pointer;
     transition: background 0.13s, color 0.13s, border-color 0.13s;
   }
-  .open-editor:hover {
+  .code-btn:hover {
     background: var(--surface-4);
     border-color: var(--accent);
+    color: var(--accent-bright);
+  }
+  /* Same "you are here" treatment the nav group gives its active tab. */
+  .code-btn.on {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
     color: var(--accent-bright);
   }
   .body {

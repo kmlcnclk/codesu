@@ -82,11 +82,11 @@ export async function createTerminal(
     // Kept in sync with the CSS theme tokens in src/app.css (xterm needs literal
     // color strings, so these can't reference var(--…)).
     theme: {
-      background: "#0a0c11", // --term-bg
-      foreground: "#e9eef6", // --text
-      cursor: "#6e8bff", // --accent
-      cursorAccent: "#0a0c11",
-      selectionBackground: "#2b3566", // indigo-tinted selection
+      background: "#131416", // --term-bg
+      foreground: "#bcbec4", // --text-secondary (the IDE's editor foreground)
+      cursor: "#ced0d6",
+      cursorAccent: "#131416",
+      selectionBackground: "#214283", // the IDE's editor selection
     },
   });
 

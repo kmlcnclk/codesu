@@ -70,12 +70,18 @@ export const STATE_RANK: Record<AgentState, number> = {
   exited: 4,
 };
 
+/**
+ * Per-state label and colour. Kept in step with the hue palette in `src/app.css` (this is
+ * plain TS, so it can't read a custom property): `working` is the blue hue, `blocked` the
+ * danger red, `done` the ok green, and the two quiet states stay grey so the three that
+ * want your attention are the only ones with colour.
+ */
 export const STATE_META: Record<AgentState, { label: string; color: string }> = {
-  working: { label: "Working", color: "#6e8bff" },
-  blocked: { label: "Blocked", color: "#ff5f57" },
-  done: { label: "Done", color: "#3fb950" },
-  idle: { label: "Idle", color: "#8b98a9" },
-  exited: { label: "Exited", color: "#6b7789" },
+  working: { label: "Working", color: "#6ea8fe" },
+  blocked: { label: "Blocked", color: "#f9757a" },
+  done: { label: "Done", color: "#4fd07a" },
+  idle: { label: "Idle", color: "#8d97a9" },
+  exited: { label: "Exited", color: "#5a5d63" },
 };
 
 /** How often the activity monitor re-reads every live agent's screen. */

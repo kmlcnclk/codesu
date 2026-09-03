@@ -557,15 +557,23 @@
     width: 3px;
     border-radius: 0 3px 3px 0;
     background: var(--accent);
-    opacity: 0;
+    /* Faintly on for every row: the colour is the workspace's identity, not a selection
+       cue, so it should be readable down the whole list — full strength when active. */
+    opacity: 0.4;
     transition: opacity 0.14s;
   }
   .ws:hover {
     background: var(--surface-3);
   }
+  .ws:hover .bar {
+    opacity: 0.7;
+  }
   .ws.active {
-    background: var(--surface-4);
+    background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  .ws.active .ws-name {
+    color: color-mix(in srgb, var(--accent) 55%, var(--text));
   }
   .ws.active .bar {
     opacity: 1;

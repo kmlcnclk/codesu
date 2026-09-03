@@ -350,7 +350,7 @@
   }
   .progress.done {
     color: var(--ok);
-    background: rgba(63, 185, 80, 0.14);
+    background: rgba(89, 168, 105, 0.16);
   }
   .head .sp,
   .file-head .sp {
@@ -524,8 +524,8 @@
   }
   .viewed-btn.on {
     color: var(--ok);
-    border-color: rgba(63, 185, 80, 0.4);
-    background: rgba(63, 185, 80, 0.12);
+    border-color: rgba(89, 168, 105, 0.42);
+    background: rgba(89, 168, 105, 0.14);
   }
 
   /* ---- diff body ---- */
@@ -579,23 +579,23 @@
   */
   tr.add td.txt,
   td.txt.add {
-    background: rgba(63, 185, 80, 0.06);
+    background: rgba(89, 168, 105, 0.13);
     border-left-color: var(--ok);
   }
   tr.add td.ln,
   td.ln.add {
-    color: rgba(122, 208, 133, 0.8);
-    background: rgba(63, 185, 80, 0.05);
+    color: rgba(137, 199, 150, 0.85);
+    background: rgba(89, 168, 105, 0.1);
   }
   tr.del td.txt,
   td.txt.del {
-    background: rgba(255, 107, 107, 0.06);
+    background: rgba(247, 84, 100, 0.13);
     border-left-color: var(--danger);
   }
   tr.del td.ln,
   td.ln.del {
-    color: rgba(255, 150, 150, 0.8);
-    background: rgba(255, 107, 107, 0.05);
+    color: rgba(229, 138, 148, 0.85);
+    background: rgba(247, 84, 100, 0.1);
   }
   /* The blank opposite an unpaired add/del in split view. */
   td.txt.pad,
@@ -632,42 +632,41 @@
     for why the diff carries its own class names instead of CodeMirror's.
   */
   td.txt :global(.tok-comment) {
-    color: #6b7689;
-    font-style: italic;
+    color: #7a7e85;
   }
   td.txt :global(.tok-keyword) {
-    color: #c07af7;
+    color: #cf8e6d;
   }
   td.txt :global(.tok-string) {
-    color: #7fd88f;
+    color: #6aab73;
   }
   td.txt :global(.tok-number) {
-    color: #f0883e;
+    color: #2aacb8;
   }
   td.txt :global(.tok-fn) {
-    color: #8aa1ff;
+    color: #56a8f5;
   }
   td.txt :global(.tok-prop) {
-    color: #39c5cf;
+    color: #c77dbb;
   }
   td.txt :global(.tok-type) {
-    color: #e3b341;
+    color: #bcbec4;
   }
   td.txt :global(.tok-tag) {
-    color: #ff7b72;
+    color: #e8bf6a;
   }
   td.txt :global(.tok-punct) {
-    color: #8b98a9;
+    color: #bcbec4;
   }
   td.txt :global(.tok-heading) {
-    color: #8aa1ff;
+    color: #56a8f5;
     font-weight: 700;
   }
   td.txt :global(.tok-link) {
-    color: #39c5cf;
+    color: #548af7;
     text-decoration: underline;
   }
   td.txt :global(.tok-invalid) {
-    color: #ff6b6b;
+    color: #f75464;
   }
 </style>

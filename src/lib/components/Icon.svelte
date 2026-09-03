@@ -29,6 +29,7 @@
     terminal:
       "<rect x='2' y='4' width='20' height='16' rx='2.2'/><path d='M7 9l3 3-3 3'/><path d='M13 15h4'/>",
     close: "<path d='M18 6 6 18'/><path d='M6 6l12 12'/>",
+    search: "<circle cx='11' cy='11' r='7'/><path d='M20 20l-4.3-4.3'/>",
     // split-pane controls
     columns:
       "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M12 4v16'/>",

@@ -81,7 +81,7 @@ fn reject_traversal(path: &Path) -> Result<(), String> {
 
 /// Resolve `path` and assert it sits inside `root`. Used for reads, where the target
 /// must already exist.
-fn resolve_inside(root: &str, path: &str) -> Result<(PathBuf, PathBuf), String> {
+pub fn resolve_inside(root: &str, path: &str) -> Result<(PathBuf, PathBuf), String> {
     let root = canonical_root(root)?;
     let raw = Path::new(path.trim());
     reject_traversal(raw)?;
