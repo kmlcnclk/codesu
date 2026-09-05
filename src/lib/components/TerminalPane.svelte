@@ -2,12 +2,17 @@
   import { onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { createTerminal, type TerminalHandle } from "$lib/terminal/createTerminal";
-  import { app, shellQuote, STATE_META, type Agent } from "$lib/store/app.svelte";
+  import {
+    app,
+    shellQuote,
+    STATE_META,
+    type Agent,
+    type TaskAttachment,
+  } from "$lib/store/app.svelte";
   import {
     attach,
     attachBlob,
     attachmentsOf,
-    dragState,
     forget,
     forgetAll,
     insertAgain,
@@ -229,7 +234,6 @@
   const attached = $derived(attachmentsOf(agent.id));
   /** e.g. files dropped on a dormant pane, waiting for it to be resumed. */
   const notice = $derived(notices[agent.id] ?? null);
-  const dragOver = $derived(dragState.agentId === agent.id);
   /**
    * The attachments panel is CLOSED until you open it, and it lives off the right
    * edge — a full-width bar across the bottom sat on top of the agent's own output,
@@ -317,6 +321,50 @@
     handle.paste(text);
   }
 
+  let trayEl = $state<HTMLElement | null>(null);
+  let toggleEl = $state<HTMLElement | null>(null);
+  let previewEl = $state<HTMLElement | null>(null);
+
+  /**
+   * Dismiss the panel on a click anywhere else, and on Escape — a popover that can
+   * only be closed by its own × is a popover you fight with.
+   *
+   * The handle is excluded from "outside": it has its own toggle, and closing here
+   * first would let that toggle immediately reopen what the click meant to close.
+   * Neither listener consumes the event, so a click into the terminal still lands and
+   * Escape still reaches the agent.
+   */
+  $effect(() => {
+    if (!trayOpen && !preview) return;
+
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (trayEl?.contains(target) || toggleEl?.contains(target)) return;
+      if (previewEl?.contains(target)) return;
+      // A click outside the preview dismisses the preview, keeping the panel — one
+      // layer at a time, as any stacked popover should behave.
+      if (preview) {
+        preview = null;
+        return;
+      }
+      trayOpen = false;
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      // The preview sits on top, so Escape dismisses that first.
+      if (preview) preview = null;
+      else trayOpen = false;
+    };
+
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
+  });
+
   /*
    * Announce a new attachment on the handle: one pulse, plus the count that is always
    * there. A drop is handled by the window-level listener rather than by this
@@ -338,8 +386,20 @@
     seen = n;
   });
 
-  function reveal(path: string) {
-    openPath(path).catch((err) => fail(err, "could not open the attachment"));
+  /**
+   * Clicking an attachment shows it. An image opens in a preview over the pane — the
+   * point of attaching a screenshot is usually to check you sent the right one, and
+   * bouncing out to Preview.app for that is a poor trade. Anything else (a README, a
+   * PDF) goes to whatever the system opens it with.
+   */
+  let preview = $state<TaskAttachment | null>(null);
+
+  function view(a: TaskAttachment) {
+    if (a.isImage && isThumbnailable(a.path)) {
+      preview = a;
+      return;
+    }
+    openPath(a.path).catch((err) => fail(err, "could not open the attachment"));
   }
 
   function focus() {
@@ -413,7 +473,7 @@
     -->
     {#if started || notice}
       {#if trayOpen}
-        <div class="tray">
+        <div class="tray" bind:this={trayEl}>
           <header class="tray-head">
             <span class="tray-title">
               Attachments{attached.length > 0 ? ` · ${attached.length}` : ""}
@@ -453,8 +513,8 @@
                 <li class="chip">
                   <button
                     class="chip-main"
-                    title="{a.path}&#10;Click to insert this path again"
-                    onclick={(e) => { e.stopPropagation(); insertAgain(agent.id, a.path); }}
+                    title="{a.path}&#10;Click to view"
+                    onclick={(e) => { e.stopPropagation(); view(a); }}
                   >
                     {#if a.isImage && isThumbnailable(a.path)}
                       <img class="chip-thumb" src={thumbnailSrc(a.path)} alt={a.name} loading="lazy" />
@@ -465,11 +525,11 @@
                   </button>
                   <button
                     class="chip-act"
-                    title="Open in the default app"
-                    aria-label="Open attachment"
-                    onclick={(e) => { e.stopPropagation(); reveal(a.path); }}
+                    title="Type this path at the prompt again"
+                    aria-label="Insert path again"
+                    onclick={(e) => { e.stopPropagation(); insertAgain(agent.id, a.path); }}
                   >
-                    <Icon name="open" size={11} />
+                    <Icon name="arrowRight" size={11} />
                   </button>
                   <button
                     class="chip-act danger"
@@ -492,8 +552,37 @@
         </div>
       {/if}
 
+      {#if preview}
+        <!-- Image preview. Sized to the pane, never larger than the image itself, so a
+             small screenshot is not stretched into mush. -->
+        <div class="preview">
+          <figure class="preview-box" bind:this={previewEl}>
+            <img src={thumbnailSrc(preview.path)} alt={preview.name} />
+            <figcaption>
+              <span class="preview-name" title={preview.path}>{preview.name}</span>
+              <button
+                class="preview-open"
+                title="Open in the default app"
+                onclick={(e) => { e.stopPropagation(); openPath(preview!.path).catch((err) => fail(err, "could not open the attachment")); }}
+              >
+                <Icon name="open" size={12} />
+              </button>
+              <button
+                class="preview-x"
+                title="Close (Esc)"
+                aria-label="Close preview"
+                onclick={(e) => { e.stopPropagation(); preview = null; }}
+              >
+                <Icon name="close" size={13} />
+              </button>
+            </figcaption>
+          </figure>
+        </div>
+      {/if}
+
       <!-- The handle: quiet when there is nothing attached, badged when there is. -->
       <button
+        bind:this={toggleEl}
         class="tray-toggle"
         class:on={trayOpen}
         class:has={attached.length > 0 || !!notice}
@@ -513,17 +602,6 @@
       </button>
     {/if}
 
-    <!-- Drop target. Tauri owns the drag events, so this is driven by the shared
-         dragState rather than by CSS :hover. -->
-    {#if dragOver}
-      <div class="dropzone">
-        <div class="dropzone-card">
-          <Icon name="paperclip" size={20} />
-          <strong>Attach to {agent.name}</strong>
-          <span>Release to hand the file paths to this agent</span>
-        </div>
-      </div>
-    {/if}
     {#if visible && error}
       <!-- The process could not start. Say why, and name the folder — a moved workspace
            or a deleted worktree is by far the most common cause, and it is invisible
@@ -571,43 +649,8 @@
   }
   /* ---------- attachments ---------- */
 
-  /* Drop target: a full-pane invitation, not a 1px border you have to hunt for. */
-  .dropzone {
-    position: absolute;
-    inset: 0;
-    z-index: 6;
-    display: grid;
-    place-items: center;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    outline: 2px dashed var(--accent);
-    outline-offset: -6px;
-    /* The drag is Tauri's, not the webview's — nothing here may swallow it. */
-    pointer-events: none;
-  }
-  .dropzone-card {
-    display: grid;
-    justify-items: center;
-    gap: 3px;
-    padding: 14px 20px;
-    border-radius: 10px;
-    background: var(--surface-float);
-    border: 1px solid var(--border-strong);
-    box-shadow: var(--shadow-md);
-    color: var(--text-secondary);
-    text-align: center;
-  }
-  .dropzone-card strong {
-    font-size: 13px;
-    color: var(--text);
-  }
-  .dropzone-card span {
-    font-size: 11.5px;
-    color: var(--text-faint);
-  }
-  .dropzone-card :global(svg) {
-    color: var(--accent-bright);
-  }
+  /* A drag paints nothing over the pane — no overlay, no dashed outline. Files
+     attach as the drag arrives, and the tray handle is where you see what landed. */
 
   /*
    * The handle: a small square on the pane's right edge. Nearly invisible until
@@ -776,7 +819,76 @@
     color: var(--text-secondary);
   }
 
-  /* One chip per attached file: thumbnail, name, open, forget. */
+  /* ---- image preview ---- */
+  .preview {
+    position: absolute;
+    inset: 0;
+    z-index: 7;
+    display: grid;
+    place-items: center;
+    padding: 16px;
+    background: color-mix(in srgb, var(--bg) 78%, transparent);
+    backdrop-filter: blur(2px);
+  }
+  .preview-box {
+    margin: 0;
+    max-width: 100%;
+    max-height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-radius: 10px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-float);
+    box-shadow: var(--shadow-md);
+    overflow: hidden;
+  }
+  .preview-box img {
+    min-height: 0;
+    max-width: 100%;
+    /* The caption is ~34px; leaving it out would let a tall image push it off. */
+    max-height: calc(100% - 34px);
+    object-fit: contain;
+    background: var(--term-bg);
+  }
+  .preview-box figcaption {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 6px 6px 10px;
+    border-top: 1px solid var(--border);
+  }
+  .preview-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .preview-open,
+  .preview-x {
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .preview-open:hover,
+  .preview-x:hover {
+    background: var(--surface-3);
+    color: var(--text);
+  }
+
+  /* One chip per attached file: thumbnail, name, view, insert, forget. */
   .chips {
     list-style: none;
     margin: 0;
