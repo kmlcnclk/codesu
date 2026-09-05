@@ -103,9 +103,6 @@ export const gitDiffAll = (repo: string, staged: boolean): Promise<string> =>
 export const gitStageFile = (repo: string, path: string, staged: boolean): Promise<void> =>
   invoke("git_stage_file", { repo, path, staged });
 
-export const discoverScripts = async (root: string): Promise<Script[]> =>
-  camel(await invoke("discover_scripts", { root }));
-
 /**
  * The command that runs one test, resolved from the build tool on disk (Gradle module,
  * pytest node id, `vitest -t`, …). Returns a `Script` the Run panel treats exactly like a

@@ -6,7 +6,13 @@
  * never pays for the Rust or Java parsers.
  */
 import { EditorView } from "@codemirror/view";
-import { HighlightStyle, syntaxHighlighting, type LanguageSupport } from "@codemirror/language";
+import {
+  HighlightStyle,
+  LanguageSupport,
+  StreamLanguage,
+  syntaxHighlighting,
+  type StreamParser,
+} from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 
 /**
@@ -92,15 +98,37 @@ export const codesuTheme = EditorView.theme(
  */
 export const codesuHighlight = HighlightStyle.define([
   { tag: [t.comment, t.lineComment, t.blockComment], color: "#7a7e85" },
+  // KDoc/JavaDoc is a comment the IDE treats as documentation, and tints accordingly.
+  { tag: [t.docComment, t.docString], color: "#5f826b" },
   { tag: [t.keyword, t.modifier, t.controlKeyword, t.operatorKeyword], color: "#cf8e6d" },
+  { tag: [t.self, t.moduleKeyword, t.definitionKeyword], color: "#cf8e6d" },
+  // `true` / `false` / `null` are keywords in the IDE's scheme, not literals.
+  { tag: [t.bool, t.null], color: "#cf8e6d" },
   { tag: [t.string, t.special(t.string)], color: "#6aab73" },
   { tag: [t.regexp, t.escape], color: "#2aacb8" },
-  { tag: [t.number, t.bool, t.null, t.atom], color: "#2aacb8" },
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "#56a8f5" },
+  { tag: [t.number, t.integer, t.float, t.unit], color: "#2aacb8" },
+  // Stream modes report `true` / `false` / `None` as atoms; the IDE paints them keywords.
+  { tag: [t.atom], color: "#cf8e6d" },
+  // A declaration is blue, a call is left plain — the IDE's way of making the place a
+  // thing is DEFINED stand out from the many places it is used.
+  {
+    tag: [
+      t.function(t.variableName),
+      t.function(t.propertyName),
+      t.function(t.definition(t.variableName)),
+      t.definition(t.function(t.variableName)),
+    ],
+    color: "#56a8f5",
+  },
   { tag: [t.definition(t.variableName), t.definition(t.propertyName)], color: "#bcbec4" },
+  // Fields and members: the violet that makes `logger.info(…)` read as state, not noise.
   { tag: [t.propertyName, t.attributeName], color: "#c77dbb" },
-  { tag: [t.annotation, t.meta], color: "#b3ae60" },
+  { tag: [t.constant(t.variableName), t.standard(t.variableName)], color: "#c77dbb" },
+  { tag: [t.special(t.variableName)], color: "#c77dbb", fontStyle: "italic" },
+  { tag: [t.labelName], color: "#b389c5" },
+  { tag: [t.annotation, t.meta, t.processingInstruction], color: "#b3ae60" },
   { tag: [t.typeName, t.className, t.namespace], color: "#bcbec4" },
+  { tag: [t.definition(t.typeName), t.definition(t.className)], color: "#bcbec4" },
   { tag: [t.tagName], color: "#e8bf6a" },
   { tag: [t.operator, t.punctuation, t.separator, t.bracket], color: "#bcbec4" },
   { tag: [t.variableName], color: "#bcbec4" },
@@ -112,6 +140,36 @@ export const codesuHighlight = HighlightStyle.define([
 ]);
 
 export const syntaxTheme = [codesuTheme, syntaxHighlighting(codesuHighlight)];
+
+/**
+ * Colour what follows a `.` as a member.
+ *
+ * The CodeMirror 5 modes below report every identifier as a plain variable, which leaves
+ * `logger.info(…)`, `candidates.size` and `Filter.eq(…)` in the same flat grey as the
+ * punctuation around them — the single biggest reason these files read as colourless next
+ * to the IDE. Looking at the character before the token is enough to tell a member from a
+ * bare identifier, and costs one string index per token.
+ */
+function memberAware(base: StreamParser<unknown>): StreamParser<unknown> {
+  return {
+    ...base,
+    tokenTable: { ...(base.tokenTable ?? {}), csMember: t.propertyName },
+    token(stream, state) {
+      const from = stream.pos;
+      const style = base.token(stream, state);
+      if (!style || stream.pos === from) return style;
+      // Only plain identifiers are re-labelled: a keyword or string after a dot is the
+      // mode telling us something we have no business overriding.
+      if (style !== "variable" && style !== "variableName") return style;
+      return stream.string.charAt(from - 1) === "." ? "csMember" : style;
+    },
+  };
+}
+
+/** Wrap a CodeMirror 5 stream mode as a language the editor can load on demand. */
+function stream(load: () => Promise<StreamParser<unknown>>): () => Promise<LanguageSupport> {
+  return async () => new LanguageSupport(StreamLanguage.define(memberAware(await load())));
+}
 
 /**
  * The loader for each extension we have a parser for. A file whose type is missing here
@@ -141,19 +199,55 @@ const LOADERS: Record<string, () => Promise<LanguageSupport>> = {
   rs: async () => (await import("@codemirror/lang-rust")).rust(),
   py: async () => (await import("@codemirror/lang-python")).python(),
   java: async () => (await import("@codemirror/lang-java")).java(),
-  // Kotlin has no parser here; Java's is close enough to colour keywords and strings.
-  kt: async () => (await import("@codemirror/lang-java")).java(),
-  kts: async () => (await import("@codemirror/lang-java")).java(),
   yaml: async () => (await import("@codemirror/lang-yaml")).yaml(),
   yml: async () => (await import("@codemirror/lang-yaml")).yaml(),
+  // Everything below is a CodeMirror 5 stream mode. They tokenise less finely than a
+  // Lezer grammar, but "keywords, strings, numbers and comments in the right colours"
+  // is most of what reading code needs — and it is what these file types had none of.
+  kt: stream(() => import("@codemirror/legacy-modes/mode/clike").then((m) => m.kotlin)),
+  kts: stream(() => import("@codemirror/legacy-modes/mode/clike").then((m) => m.kotlin)),
+  scala: stream(() => import("@codemirror/legacy-modes/mode/clike").then((m) => m.scala)),
+  groovy: stream(() => import("@codemirror/legacy-modes/mode/groovy").then((m) => m.groovy)),
+  gradle: stream(() => import("@codemirror/legacy-modes/mode/groovy").then((m) => m.groovy)),
+  c: stream(() => import("@codemirror/legacy-modes/mode/clike").then((m) => m.c)),
+  h: stream(() => import("@codemirror/legacy-modes/mode/clike").then((m) => m.c)),
+  cpp: stream(() => import("@codemirror/legacy-modes/mode/clike").then((m) => m.cpp)),
+  cc: stream(() => import("@codemirror/legacy-modes/mode/clike").then((m) => m.cpp)),
+  hpp: stream(() => import("@codemirror/legacy-modes/mode/clike").then((m) => m.cpp)),
+  cs: stream(() => import("@codemirror/legacy-modes/mode/clike").then((m) => m.csharp)),
+  dart: stream(() => import("@codemirror/legacy-modes/mode/clike").then((m) => m.dart)),
+  go: stream(() => import("@codemirror/legacy-modes/mode/go").then((m) => m.go)),
+  swift: stream(() => import("@codemirror/legacy-modes/mode/swift").then((m) => m.swift)),
+  rb: stream(() => import("@codemirror/legacy-modes/mode/ruby").then((m) => m.ruby)),
+  lua: stream(() => import("@codemirror/legacy-modes/mode/lua").then((m) => m.lua)),
+  sh: stream(() => import("@codemirror/legacy-modes/mode/shell").then((m) => m.shell)),
+  bash: stream(() => import("@codemirror/legacy-modes/mode/shell").then((m) => m.shell)),
+  zsh: stream(() => import("@codemirror/legacy-modes/mode/shell").then((m) => m.shell)),
+  toml: stream(() => import("@codemirror/legacy-modes/mode/toml").then((m) => m.toml)),
+  sql: stream(() => import("@codemirror/legacy-modes/mode/sql").then((m) => m.standardSQL)),
+  xml: stream(() => import("@codemirror/legacy-modes/mode/xml").then((m) => m.xml)),
+  properties: stream(() =>
+    import("@codemirror/legacy-modes/mode/properties").then((m) => m.properties),
+  ),
+  ini: stream(() =>
+    import("@codemirror/legacy-modes/mode/properties").then((m) => m.properties),
+  ),
+  env: stream(() =>
+    import("@codemirror/legacy-modes/mode/properties").then((m) => m.properties),
+  ),
+  dockerfile: stream(() =>
+    import("@codemirror/legacy-modes/mode/dockerfile").then((m) => m.dockerFile),
+  ),
 };
 
 /** Files recognised by NAME rather than extension. */
 const BY_NAME: Record<string, string> = {
-  dockerfile: "yaml",
-  makefile: "yaml",
-  ".gitignore": "yaml",
-  ".env": "yaml",
+  dockerfile: "dockerfile",
+  makefile: "sh",
+  ".gitignore": "properties",
+  ".env": "env",
+  ".sdkmanrc": "properties",
+  "gradle.properties": "properties",
 };
 
 /** The language mode for `path`, or null when we have no parser for it. */

@@ -1,9 +1,13 @@
 <script lang="ts">
-  import { onDestroy, untrack } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import Icon from "./Icon.svelte";
+  import EditorFind from "./EditorFind.svelte";
   import { readTextFile, writeTextFile, humanSize, relPath } from "$lib/code/api";
   import { languageFor, syntaxTheme } from "$lib/code/editor";
   import { testGutter } from "$lib/code/testGutter";
+  import { changeBars, refreshChangeBars } from "$lib/code/changeBars";
+  import { scopeChain, type ScopeLine } from "$lib/code/stickyScope";
+  import { highlightLines } from "$lib/code/highlight";
   import type { TestTarget } from "$lib/code/tests";
 
   let {
@@ -44,10 +48,11 @@
   };
 
   let container = $state<HTMLDivElement | null>(null);
-  let view: any = null;
+  // Reactive: the find bar is handed the live view, and must follow it if it is rebuilt.
+  let view = $state<any>(null);
   /** The file currently rendered in `view` (may lag `path` during a swap). */
   let shownPath: string | null = null;
-  let cm: any = null; // the CodeMirror modules, imported once
+  let cm = $state<any>(null); // the CodeMirror modules, imported once
   const buffers = new Map<string, Buffer>();
 
   let loading = $state(false);
@@ -107,17 +112,34 @@
       m.view.keymap.of([
         // Save first so ⌘S never falls through to the browser's own binding.
         { key: "Mod-s", preventDefault: true, run: () => (void save(), true) },
+        // Find, ahead of `searchKeymap`, so OUR bar opens instead of CodeMirror's.
+        { key: "Mod-f", preventDefault: true, run: () => (openFind(false), true) },
+        { key: "Mod-Alt-f", preventDefault: true, run: () => (openFind(true), true) },
+        {
+          key: "Mod-g",
+          preventDefault: true,
+          run: () => (findOpen ? finder?.findNext() : openFind(false), true),
+          shift: () => (findOpen ? finder?.findPrev() : openFind(false), true),
+        },
+        { key: "Escape", run: () => (findOpen ? (closeFind(), true) : false) },
         ...m.commands.defaultKeymap,
         ...m.search.searchKeymap,
         ...m.commands.historyKeymap,
         ...m.language.foldKeymap,
         m.commands.indentWithTab,
       ]),
-      m.search.search({ top: true }),
+      /*
+        The panel is what CodeMirror gates its match highlighting on, so it stays — but
+        it renders nothing. The visible find bar is EditorFind, above the editor.
+      */
+      m.search.search({ top: true, createPanel: () => ({ dom: document.createElement("div") }) }),
       ...syntaxTheme,
       // A ▶ beside every test in the file. Bound to `p`, not to the reactive `path`, so a
       // buffer kept for a background tab keeps running ITS own file's tests.
       ...(onRunTest ? testGutter(p, (target) => onRunTest(target, p)) : []),
+      // Stripes beside the lines that differ from disk. Reads the buffer's `saved` text
+      // live, so the bars clear themselves the moment a save lands.
+      ...changeBars(() => buffers.get(p)?.saved ?? content),
       m.view.EditorView.updateListener.of((u: any) => {
         if (u.docChanged) {
           const buf = buffers.get(p);
@@ -125,6 +147,7 @@
           // original content should clear the dot, not leave the file looking unsaved.
           if (buf) setDirty(p, u.state.doc.toString() !== buf.saved);
         }
+        if (u.docChanged || u.geometryChanged) recomputeSticky();
         if (u.selectionSet || u.docChanged) {
           const head = u.state.selection.main.head;
           const line = u.state.doc.lineAt(head);
@@ -198,6 +221,9 @@
     shownPath = p;
     view.focus();
     applyReveal();
+    // A file swap replaces the editor state, and with it CodeMirror's search state — the
+    // open find bar has to put its query back or its highlights quietly disappear.
+    if (findOpen) void tick().then(() => finder?.reapply());
   }
 
   /** The last `revealAt.token` acted on, so one hit is never applied twice. */
@@ -240,6 +266,8 @@
       buf.modifiedMs = mtime;
       buf.saved = content;
       setDirty(p, false);
+      // The baseline just moved to what we wrote; the change bars have to re-diff.
+      view?.dispatch({ effects: refreshChangeBars.of(null) });
       conflict = false;
       savedFlash = true;
       setTimeout(() => (savedFlash = false), 1200);
@@ -292,6 +320,117 @@
     void show(p);
   });
 
+  // ---------- sticky scope ----------
+  /** The enclosing `class …` / `fun …` lines pinned above the first visible line. */
+  let sticky = $state<ScopeLine[]>([]);
+  /** Syntax-highlighted markup per sticky line's text, so scrolling never re-parses. */
+  let stickyHtml = $state<Record<string, string>>({});
+  let stickyEl = $state<HTMLDivElement | null>(null);
+
+  function recomputeSticky() {
+    if (!view || !path) {
+      sticky = [];
+      return;
+    }
+    const rect = view.scrollDOM.getBoundingClientRect();
+    // Ask for the line just BELOW the breadcrumb, otherwise the header describes the
+    // line it is itself covering and flickers between two scopes.
+    const y = rect.top + (stickyEl?.offsetHeight ?? 0) + 2;
+    const pos = view.posAtCoords({ x: rect.left + 8, y }, false);
+    const doc = view.state.doc;
+    const top = doc.lineAt(Math.max(0, Math.min(pos ?? 0, doc.length))).number;
+    const next = scopeChain((n: number) => doc.line(n).text, top);
+    // Same chain as last frame: leave the array alone so nothing re-renders.
+    if (
+      next.length === sticky.length &&
+      next.every((l, i) => l.no === sticky[i].no && l.text === sticky[i].text)
+    ) {
+      return;
+    }
+    sticky = next;
+    void colourSticky(next);
+  }
+
+  /** Colour the breadcrumb the same way the code under it is coloured. */
+  async function colourSticky(lines: ScopeLine[]) {
+    const p = path;
+    if (!p || !lines.length) return;
+    const missing = lines.map((l) => l.text).filter((t) => !(t in stickyHtml));
+    if (!missing.length) return;
+    const html = await highlightLines(p, missing);
+    if (!html || path !== p) return;
+    const next = { ...stickyHtml };
+    missing.forEach((t, i) => (next[t] = html[i]));
+    stickyHtml = next;
+  }
+
+  /** Recompute on every scroll and geometry change of the live view. */
+  $effect(() => {
+    const v = view;
+    if (!v) return;
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        recomputeSticky();
+      });
+    };
+    v.scrollDOM.addEventListener("scroll", schedule, { passive: true });
+    schedule();
+    return () => {
+      v.scrollDOM.removeEventListener("scroll", schedule);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  });
+
+  /** Jump to a breadcrumb line — the whole point of showing where you are. */
+  function gotoSticky(no: number) {
+    if (!view || !cm) return;
+    const pos = view.state.doc.line(no).from;
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: cm.view.EditorView.scrollIntoView(pos, { y: "start", yMargin: 40 }),
+    });
+    view.focus();
+  }
+
+  // ---------- find / replace ----------
+  /** Whether the find bar is on screen (⌘F). */
+  let findOpen = $state(false);
+  /** EditorFind's exported handle, for driving it from the editor's keymap. */
+  let finder = $state<{
+    focusInput: (seed?: string, withReplace?: boolean) => void;
+    reapply: () => void;
+    findNext: () => void;
+    findPrev: () => void;
+  } | null>(null);
+
+  /**
+   * Open the find bar, seeded with the editor's selection.
+   *
+   * A one-line selection is what the user means by "find this"; a multi-line one is
+   * almost never a search term, so it is left alone.
+   */
+  function openFind(withReplace: boolean) {
+    let seed = "";
+    if (view) {
+      const sel = view.state.selection.main;
+      if (!sel.empty && sel.to - sel.from <= 200) {
+        const text = view.state.sliceDoc(sel.from, sel.to);
+        if (!text.includes("\n")) seed = text;
+      }
+    }
+    findOpen = true;
+    // A first open mounts the bar; `focusInput` has to wait for it to exist.
+    tick().then(() => finder?.focusInput(seed, withReplace));
+  }
+
+  function closeFind() {
+    findOpen = false;
+    view?.focus();
+  }
+
   /**
    * Copy the live view's state back into its buffer. Tracked by `shownPath` rather than
    * `path`, because by the time the swap effect runs `path` is already the INCOMING file
@@ -342,7 +481,40 @@
     <div class="empty"><p>Loading…</p></div>
   {/if}
 
-  <div class="cm-host" bind:this={container} onfocusout={stash} role="presentation"></div>
+  {#if findOpen && view && cm}
+    <EditorFind
+      bind:this={finder}
+      {view}
+      search={cm.search}
+      onClose={() => (findOpen = false)}
+    />
+  {/if}
+
+  <!--
+    The editor and its overlay. CodeMirror owns everything inside `.cm-host`, so the
+    breadcrumb is a SIBLING painted over it rather than a child it would fight with.
+  -->
+  <div class="cm-area">
+    <div class="cm-host" bind:this={container} onfocusout={stash} role="presentation"></div>
+    {#if sticky.length}
+      <div class="sticky" bind:this={stickyEl}>
+        {#each sticky as line (line.no)}
+          <button
+            class="sticky-row"
+            onclick={() => gotoSticky(line.no)}
+            title="Go to line {line.no}"
+          >
+            <span class="sticky-no">{line.no}</span>
+            <span class="sticky-code"
+              >{#if stickyHtml[line.text]}<!-- eslint-disable-next-line svelte/no-at-html-tags -->{@html stickyHtml[
+                  line.text
+                ]}{:else}{line.text}{/if}</span
+            >
+          </button>
+        {/each}
+      </div>
+    {/if}
+  </div>
 
   {#if path && !refused}
     <div class="statusbar">
@@ -365,13 +537,103 @@
     position: relative;
     background: var(--term-bg);
   }
+  .cm-area {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    position: relative;
+  }
   .cm-host {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     overflow: hidden;
   }
+  /* ---- sticky scope breadcrumb ---- */
+  .sticky {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.28);
+    overflow: hidden;
+  }
+  .sticky-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    width: 100%;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre;
+    overflow: hidden;
+  }
+  .sticky-row:hover {
+    background: var(--surface-3);
+  }
+  /* Matches CodeMirror's own gutter so the breadcrumb's code lines up with the file's. */
+  .sticky-no {
+    flex-shrink: 0;
+    min-width: 42px;
+    padding-right: 10px;
+    text-align: right;
+    color: var(--text-ghost);
+    font-size: 11.5px;
+  }
+  .sticky-code {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-left: 4px;
+  }
+  .sticky-code :global(.tok-comment) {
+    color: #7a7e85;
+  }
+  .sticky-code :global(.tok-doc) {
+    color: #5f826b;
+  }
+  .sticky-code :global(.tok-meta) {
+    color: #b3ae60;
+  }
+  .sticky-code :global(.tok-keyword) {
+    color: #cf8e6d;
+  }
+  .sticky-code :global(.tok-string) {
+    color: #6aab73;
+  }
+  .sticky-code :global(.tok-number) {
+    color: #2aacb8;
+  }
+  .sticky-code :global(.tok-fn) {
+    color: #56a8f5;
+  }
+  .sticky-code :global(.tok-prop) {
+    color: #c77dbb;
+  }
+  .sticky-code :global(.tok-type),
+  .sticky-code :global(.tok-punct) {
+    color: #bcbec4;
+  }
   .cm-host :global(.cm-editor) {
     height: 100%;
+  }
+  /* CodeMirror's own search panel is kept alive but empty — EditorFind is the UI. */
+  .cm-host :global(.cm-panels) {
+    display: none;
   }
   .bar {
     display: flex;

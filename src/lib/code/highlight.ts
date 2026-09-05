@@ -16,12 +16,23 @@ import { languageFor } from "./editor";
 
 /** Mirrors the editor's `codesuHighlight` roles, one CSS class per token family. */
 const diffHighlighter = tagHighlighter([
-  { tag: [t.comment, t.lineComment, t.blockComment, t.docComment], class: "tok-comment" },
+  { tag: [t.comment, t.lineComment, t.blockComment], class: "tok-comment" },
+  { tag: [t.docComment, t.docString], class: "tok-doc" },
   { tag: [t.keyword, t.modifier, t.controlKeyword, t.operatorKeyword], class: "tok-keyword" },
+  { tag: [t.self, t.moduleKeyword, t.definitionKeyword, t.bool, t.null], class: "tok-keyword" },
   { tag: [t.string, t.special(t.string), t.regexp], class: "tok-string" },
-  { tag: [t.number, t.bool, t.null, t.atom], class: "tok-number" },
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], class: "tok-fn" },
+  { tag: [t.number, t.integer, t.float, t.unit, t.atom], class: "tok-number" },
+  {
+    tag: [
+      t.function(t.variableName),
+      t.function(t.propertyName),
+      t.function(t.definition(t.variableName)),
+    ],
+    class: "tok-fn",
+  },
+  { tag: [t.annotation, t.meta, t.processingInstruction], class: "tok-meta" },
   { tag: [t.propertyName, t.attributeName], class: "tok-prop" },
+  { tag: [t.constant(t.variableName), t.standard(t.variableName), t.labelName], class: "tok-prop" },
   { tag: [t.typeName, t.className, t.namespace], class: "tok-type" },
   { tag: [t.tagName], class: "tok-tag" },
   { tag: [t.operator, t.punctuation, t.separator, t.bracket], class: "tok-punct" },

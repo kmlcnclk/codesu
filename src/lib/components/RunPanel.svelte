@@ -3,7 +3,7 @@
   import { untrack } from "svelte";
   import Icon from "./Icon.svelte";
   import { createTerminal, type TerminalHandle } from "$lib/terminal/createTerminal";
-  import { discoverScripts, type Script } from "$lib/code/api";
+  import type { Script } from "$lib/code/api";
 
   let {
     workspaceId,
@@ -27,54 +27,9 @@
   let starting = false;
   let error = $state<string | null>(null);
 
-  let scripts = $state<Script[]>([]);
-  let loadingScripts = $state(false);
-  let filter = $state("");
   let custom = $state("");
-  let menuOpen = $state(false);
-  /** The last script run, offered as a one-click "Run again". */
+  /** The last script run — from the editor's Run gutter — offered as "Run again". */
   let lastScript = $state<Script | null>(null);
-
-  const filtered = $derived(
-    scripts.filter((s) => {
-      const q = filter.trim().toLowerCase();
-      return !q || s.name.toLowerCase().includes(q) || s.command.toLowerCase().includes(q);
-    }),
-  );
-
-  /** Group the picker by where each command came from (npm, make, cargo, …). */
-  const grouped = $derived(
-    Object.entries(
-      filtered.reduce<Record<string, Script[]>>((acc, s) => {
-        (acc[s.source] ??= []).push(s);
-        return acc;
-      }, {}),
-    ).sort(([a], [b]) => a.localeCompare(b)),
-  );
-
-  const SOURCE_LABEL: Record<string, string> = {
-    npm: "package.json",
-    make: "Makefile",
-    cargo: "Cargo",
-    gradle: "Gradle",
-    go: "Go",
-    python: "Python",
-    shell: "Shell scripts",
-  };
-
-  async function refreshScripts() {
-    if (!root) return;
-    loadingScripts = true;
-    try {
-      scripts = await discoverScripts(root);
-      error = null;
-    } catch (e) {
-      error = String(e);
-      scripts = [];
-    } finally {
-      loadingScripts = false;
-    }
-  }
 
   async function ensureTerminal() {
     if (terminal && terminalFor === workspaceId) return terminal;
@@ -124,16 +79,14 @@
 
   function run(script: Script) {
     lastScript = script;
-    menuOpen = false;
     void send(script.command, script.cwd);
   }
 
   /**
    * Run a script the panel didn't discover — the editor's Run-gutter arrow.
    *
-   * Goes through `run` so a test behaves like any other entry: it becomes the "Run again"
-   * target and names the picker button, which is what makes re-running the last test one
-   * click (or the Run panel's own shell history) away.
+   * Goes through `run` so the test becomes the "Run again" target, which is what makes
+   * re-running the last test one click (or the Run panel's own shell history) away.
    */
   export function runScript(script: Script) {
     run(script);
@@ -166,7 +119,6 @@
     const el = container;
     const ws = workspaceId;
     if (!el || !ws) return;
-    void refreshScripts();
 
     // The panel is collapsed/expanded and the whole view is toggled with `display`, so
     // watch for it gaining a box and (re)fit then — a terminal created at zero size
@@ -201,40 +153,6 @@
 
 <div class="run-panel">
   <div class="bar">
-    <div class="picker">
-      <button class="pick-btn" onclick={() => (menuOpen = !menuOpen)} title="Choose a script">
-        <Icon name="play" size={13} />
-        <span class="pick-lbl">{lastScript ? lastScript.name : "Scripts"}</span>
-        <Icon name="chevronDown" size={12} />
-      </button>
-      {#if menuOpen}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="backdrop" onclick={() => (menuOpen = false)} role="presentation"></div>
-        <div class="menu">
-          <input class="search" placeholder="Filter scripts…" bind:value={filter} />
-          <div class="menu-scroll">
-            {#if loadingScripts}
-              <div class="menu-empty">Scanning…</div>
-            {:else if !grouped.length}
-              <div class="menu-empty">No runnable scripts found.</div>
-            {/if}
-            {#each grouped as [source, list] (source)}
-              <div class="group">{SOURCE_LABEL[source] ?? source}</div>
-              {#each list as s (s.id)}
-                <button class="item" onclick={() => run(s)} title={s.command}>
-                  <span class="item-name">{s.name}</span>
-                  <span class="item-cmd">{s.command}</span>
-                </button>
-              {/each}
-            {/each}
-          </div>
-          <button class="rescan" onclick={refreshScripts}>
-            <Icon name="restore" size={12} /> Rescan
-          </button>
-        </div>
-      {/if}
-    </div>
-
     {#if lastScript}
       <button class="go" onclick={() => run(lastScript!)} title={lastScript.command}>
         <Icon name="play" size={12} /> Run again
@@ -281,10 +199,6 @@
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
-  .picker {
-    position: relative;
-  }
-  .pick-btn,
   .go,
   .stop {
     display: flex;
@@ -299,114 +213,17 @@
     border-radius: 6px;
     cursor: pointer;
     white-space: nowrap;
+    flex-shrink: 0;
   }
-  .pick-btn:hover,
   .go:hover {
     background: var(--surface-4);
     color: var(--accent-bright);
     border-color: var(--accent);
   }
-  .pick-lbl {
-    max-width: 190px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   .stop:hover {
+    background: var(--danger-bg);
     color: var(--danger);
     border-color: var(--danger-line);
-  }
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 40;
-  }
-  .menu {
-    position: absolute;
-    bottom: calc(100% + 6px);
-    left: 0;
-    z-index: 41;
-    width: 340px;
-    max-height: 380px;
-    display: flex;
-    flex-direction: column;
-    background: var(--surface-float);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--r-md);
-    box-shadow: var(--shadow-lg);
-    overflow: hidden;
-  }
-  .search {
-    border: none;
-    border-bottom: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    font-size: 12px;
-    padding: 8px 10px;
-    outline: none;
-  }
-  .menu-scroll {
-    overflow: auto;
-    padding: 4px;
-  }
-  .group {
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-    color: var(--text-ghost);
-    padding: 7px 8px 3px;
-  }
-  .item {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    width: 100%;
-    text-align: left;
-    border: none;
-    background: transparent;
-    padding: 5px 8px;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  .item:hover {
-    background: var(--surface-3);
-  }
-  .item-name {
-    font-size: 12.5px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .item-cmd {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    color: var(--text-faint);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .menu-empty {
-    padding: 14px 10px;
-    font-size: 12px;
-    color: var(--text-faint);
-    text-align: center;
-  }
-  .rescan {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    border: none;
-    border-top: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 11.5px;
-    font-weight: 600;
-    padding: 7px;
-    cursor: pointer;
-  }
-  .rescan:hover {
-    background: var(--surface-3);
-    color: var(--text);
   }
   .custom {
     flex: 1;

@@ -4,11 +4,14 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { app } from "$lib/store/app.svelte";
   import { installFileDrop } from "$lib/terminal/attachments.svelte";
+  import DropOverlay from "$lib/components/DropOverlay.svelte";
+  import { gitStatus, isGitRepo } from "$lib/code/api";
   import ContextMenu, { type MenuItem } from "$lib/components/ContextMenu.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import TabBar from "$lib/components/TabBar.svelte";
   import TerminalArea from "$lib/components/TerminalArea.svelte";
   import CodePage from "$lib/components/CodePage.svelte";
+  import ReviewPage from "$lib/components/ReviewPage.svelte";
   import NewAgentDialog from "$lib/components/NewAgentDialog.svelte";
   import NewWorkspaceDialog from "$lib/components/NewWorkspaceDialog.svelte";
   import TasksPage from "$lib/components/TasksPage.svelte";
@@ -28,7 +31,8 @@
     | "report"
     | "history"
     | "settings"
-    | "terminal";
+    | "terminal"
+    | "review";
   let view = $state<View>("agents");
 
   /**
@@ -176,6 +180,12 @@
   function onKeydown(e: KeyboardEvent) {
     if (isEditableTarget(e.target)) return;
     const key = e.key.toLowerCase();
+    // Review is a place you step into and back out of, so Esc leaves it.
+    if (key === "escape" && view === "review" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      closeReview();
+      return;
+    }
     const shortcuts = app.getShortcutsByContext(view as any);
 
     for (const shortcut of shortcuts) {
@@ -287,6 +297,93 @@
     else enterCode();
   }
 
+  /**
+   * The view to come back to when Review is closed — same idea as `viewBeforeCode`.
+   * Review is reachable from the session's tab strip only, so that is almost always
+   * "agents", but going back where you came from is the rule either way.
+   */
+  let viewBeforeReview = $state<View>("agents");
+
+  // ---- review badge ----
+  /**
+   * The changed files of the active workspace, so the titlebar can say — without the
+   * user having to enter Review and look — that there is something to read.
+   *
+   * Polled rather than pushed: the changes come from agents editing on disk, which the
+   * app never sees. Null means "no repo here", and hides the button entirely.
+   */
+  let changedPaths = $state<string[] | null>(null);
+
+  const reviewWs = $derived(app.activeWorkspace);
+  const unreviewed = $derived(
+    reviewWs && changedPaths
+      ? changedPaths.length - app.codeViewedCount(reviewWs.id, changedPaths)
+      : 0,
+  );
+  /**
+   * Highlight only when an agent has just finished a turn.
+   *
+   * "Unreviewed files exist" was the obvious signal and the wrong one: a working tree
+   * carries dozens of changes nobody has ticked at all times, so the button was lit
+   * permanently and stopped meaning anything. A finished turn is the moment there is
+   * genuinely something NEW to read.
+   */
+  const freshTurn = $derived(
+    app.activeTabGroups.some((g) => g.agents.some((a) => a.state === "done")),
+  );
+
+  /** Code and Review belong to the workspace views; elsewhere they have nothing to act on. */
+  const inWorkspaceView = $derived(view === "agents" || view === "code" || view === "review");
+
+  $effect(() => {
+    const root = reviewWs?.path;
+    if (!root) {
+      changedPaths = null;
+      return;
+    }
+    let cancelled = false;
+
+    const refresh = async () => {
+      try {
+        if (!(await isGitRepo(root))) {
+          if (!cancelled) changedPaths = null;
+          return;
+        }
+        const st = await gitStatus(root);
+        if (!cancelled) changedPaths = st.changes.map((c) => c.path);
+      } catch {
+        if (!cancelled) changedPaths = null;
+      }
+    };
+
+    void refresh();
+    // Polling only pays for itself while a view that shows the button is on screen.
+    const timer = setInterval(() => {
+      if (inWorkspaceView) void refresh();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  });
+
+  /** Open the Review page (the titlebar's Review button). */
+  function openReview() {
+    if (view !== "review") viewBeforeReview = view;
+    view = "review";
+  }
+
+  function closeReview() {
+    view = viewBeforeReview === "review" ? "agents" : viewBeforeReview;
+  }
+
+  /** "Edit file" inside a diff — hand the file to the Code view, which owns editing. */
+  function editFromReview(absPath: string) {
+    if (app.activeWorkspaceId) app.openCodeFile(app.activeWorkspaceId, absPath);
+    enterCode();
+  }
+
   /** Switch a workspace into the Code view (from the sidebar's context menu). */
   function openCodeFromSidebar(workspaceId: string) {
     app.setActiveWorkspace(workspaceId);
@@ -338,7 +435,7 @@
       aria-label="Toggle agent sounds"
       onclick={toggleMute}
     ><Icon name={muted ? "volumeMute" : "volume"} size={15} /></button>
-    {#if (view === "agents" || view === "code") && app.activeWorkspace}
+    {#if (view === "agents" || view === "code" || view === "review") && app.activeWorkspace}
       <span class="crumbs">
         <button
           class="ws-chip"
@@ -355,20 +452,38 @@
       </span>
     {/if}
     <!--
-      Code sits here, at the end of the titlebar, rather than in the nav group: it is the
-      only view that takes over the whole window (no agent rail), so it reads as a mode
-      you enter next to the workspace it applies to — not as one tab among seven.
-      Outside the `{#if}` above, because it must stay reachable from every view.
+      Code and Review sit together at the end of the titlebar rather than in the nav
+      group: both take over the whole window (no agent rail), so they read as modes you
+      enter next to the workspace they apply to — not as two tabs among seven. Neither
+      has anything to act on outside the workspace views, so both go with them.
     -->
-    <button
-      class="code-btn"
-      class:on={view === "code"}
-      aria-pressed={view === "code"}
-      title={view === "code" ? "Close Code (⌘E)" : "Code (⌘E)"}
-      onclick={toggleCode}
-    >
-      <Icon name="code2" size={14} /><span class="cb-lbl">Code</span>
-    </button>
+    {#if inWorkspaceView}
+      {#if changedPaths}
+        <button
+          class="code-btn review-btn"
+          class:on={view === "review"}
+          class:pending={freshTurn && view !== "review"}
+          aria-pressed={view === "review"}
+          title={changedPaths.length === 0
+            ? "Review changes — working tree clean"
+            : `Review ${changedPaths.length} changed file${changedPaths.length === 1 ? "" : "s"}` +
+              (unreviewed > 0 ? ` · ${unreviewed} not yet reviewed` : " · all reviewed")}
+          onclick={() => (view === "review" ? closeReview() : openReview())}
+        >
+          <Icon name="diff" size={14} /><span class="cb-lbl">Review</span>
+          {#if changedPaths.length}<span class="rb-count">{changedPaths.length}</span>{/if}
+        </button>
+      {/if}
+      <button
+        class="code-btn"
+        class:on={view === "code"}
+        aria-pressed={view === "code"}
+        title={view === "code" ? "Close Code (⌘E)" : "Code (⌘E)"}
+        onclick={toggleCode}
+      >
+        <Icon name="code2" size={14} /><span class="cb-lbl">Code</span>
+      </button>
+    {/if}
   </header>
 
   <div class="body">
@@ -401,6 +516,15 @@
       -->
       <div style:display={view === "code" ? "flex" : "none"} style:flex="1" style:min-height="0">
         <CodePage />
+      </div>
+      <!--
+        Review is its own page, not a tab inside Code: reading a diff and editing a file
+        are different jobs, and sharing one rail made both harder to find. It is reached
+        from the session's tab strip and stays mounted so a half-read review survives a
+        trip back to the terminal.
+      -->
+      <div style:display={view === "review" ? "flex" : "none"} style:flex="1" style:min-height="0">
+        <ReviewPage onClose={closeReview} onEditFile={editFromReview} onSent={openAgentFromPage} />
       </div>
       <!--
         System terminal also stays mounted (hidden) to preserve PTY state and buffer.
@@ -441,6 +565,10 @@
 {#if popupMenu}
   <ContextMenu x={popupMenu.x} y={popupMenu.y} items={popupMenu.items} onClose={() => (popupMenu = null)} />
 {/if}
+
+<!-- Window-level, because Tauri delivers file drags to the window and no pane can see
+     them. It paints the drag and reports where the files landed. -->
+<DropOverlay />
 
 <style>
   :global(html),
@@ -667,6 +795,35 @@
     background: var(--accent-soft);
     border-color: var(--accent-line);
     color: var(--accent-bright);
+  }
+  /* Review is the quieter of the pair until an agent finishes a turn — the moment it
+     exists to advertise. */
+  .review-btn {
+    background: var(--surface-2);
+    color: var(--text-muted);
+  }
+  .review-btn.pending {
+    color: var(--accent-bright);
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+  }
+  .rb-count {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 6px;
+    background: var(--surface-4);
+    color: var(--text-muted);
+  }
+  .review-btn.pending .rb-count,
+  .review-btn.on .rb-count {
+    background: color-mix(in srgb, var(--accent) 26%, transparent);
+    color: var(--accent-bright);
+  }
+  @media (max-width: 820px) {
+    .cb-lbl {
+      display: none;
+    }
   }
   .body {
     flex: 1;
