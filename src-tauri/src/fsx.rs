@@ -185,6 +185,30 @@ pub fn list_dir(root: &str, path: &str) -> Result<Vec<DirEntry>, String> {
 /// while an Err is reserved for "the read actually failed".
 pub fn read_text_file(root: &str, path: &str) -> Result<FileContent, String> {
     let (_, file) = resolve_inside(root, path)?;
+    read_text_at(file)
+}
+
+/// Read one file by absolute path, with NO workspace containment check.
+///
+/// Attachments are the reason this exists: a user drags in a README from another
+/// checkout entirely, and `resolve_inside` would (correctly) refuse it — the editor's
+/// root scoping is about the file TREE, and an attachment is not part of one. The
+/// caller is responsible for having a legitimate reason to name this path; the size
+/// and binary guards below are shared with the scoped reader either way.
+pub fn read_attachment(path: &str) -> Result<FileContent, String> {
+    let raw = Path::new(path.trim());
+    reject_traversal(raw)?;
+    if !raw.is_absolute() {
+        return Err(format!("path must be absolute: {}", raw.display()));
+    }
+    let file = std::fs::canonicalize(raw)
+        .map_err(|e| format!("cannot resolve {}: {e}", raw.display()))?;
+    read_text_at(file)
+}
+
+/// The shared body of both readers: refuse anything too large or binary, and decode
+/// the rest lossily so a stray invalid byte still shows.
+fn read_text_at(file: PathBuf) -> Result<FileContent, String> {
     let meta = std::fs::metadata(&file).map_err(|e| format!("cannot stat {}: {e}", file.display()))?;
     if !meta.is_file() {
         return Err(format!("not a regular file: {}", file.display()));

@@ -5,57 +5,19 @@
  * path typed at the prompt. Dropped and picked files already have one; a pasted image
  * does not, so its bytes are written to a temp file first (`save_pasted_file`).
  *
- * Everything a pane attached this session is also kept here, which is what the pane's
- * attachment tray renders — the terminal itself only ever shows the path text, so
- * without this you cannot see what you actually sent.
+ * Every attach is also RECORDED ON THE AGENT (and so saved to disk), which is what the
+ * pane's attachment tray renders — the terminal itself only ever shows the path text,
+ * so without that record you cannot see what you actually sent, and a restart used to
+ * wipe it entirely.
  */
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { app, makeAttachment, type TaskAttachment } from "$lib/store/app.svelte";
+import { app, type TaskAttachment } from "$lib/store/app.svelte";
 import type { TerminalHandle } from "./createTerminal";
-
-/* ------------------------------------------------------------------ *
- * TEMPORARY DIAGNOSTIC — remove once drag & drop is confirmed working.
- *
- * The webview's console is not reachable from a `tauri dev` terminal, so every step
- * of a drag is appended to `.dnd-diag.log` in the project root instead.
- * ------------------------------------------------------------------ */
-const DIAG_ROOT = "/Users/kmlcnclk/Projects/Github/codesu";
-// On `window`, not in module scope: a hot reload builds a new module and a
-// module-level buffer would start empty and overwrite the file, erasing exactly the
-// drag events we are trying to read.
-const diagLines: string[] = ((window as unknown as { __codesuDiag?: string[] }).__codesuDiag ??= []);
-let diagLastOver = 0;
-export function trace(line: string) {
-  try {
-    diagLines.push(`${new Date().toISOString().slice(11, 23)}  ${line}`);
-    if (diagLines.length > 400) diagLines.splice(0, diagLines.length - 400);
-    void invoke("write_text_file", {
-      root: DIAG_ROOT,
-      path: `${DIAG_ROOT}/.dnd-diag.log`,
-      content: diagLines.join("\n") + "\n",
-    }).catch(() => {});
-  } catch {
-    /* diagnostics must never break the thing they are diagnosing */
-  }
-}
-trace(`module loaded — guard=${typeof window !== "undefined" && !!window.__codesuFileDrop}`);
 
 /** Live terminals, so a drop can reach the pane the pointer was actually over. */
 const panes = new Map<string, TerminalHandle>();
-
-/** What each pane has attached this session, newest last. Rendered by its tray. */
-/*
- * Reassigned rather than mutated in place.
- *
- * A pane's tray reads `byPane[id]` before that key exists, and growing an existing
- * array (or adding a brand-new key) is the case where a reader that saw `undefined`
- * can miss the update — which showed up as a file being typed at the prompt while the
- * tray still said "Nothing yet". Replacing the whole record makes the change
- * unmissable, and these lists are a handful of entries.
- */
-let byPane = $state<Record<string, TaskAttachment[]>>({});
 
 /** When each (pane, path) was last sent, for collapsing one gesture reported twice. */
 const recent = new Map<string, number>();
@@ -147,7 +109,7 @@ let lastDragTarget: string | null = null;
 let allowed = $state<string[]>([]);
 
 export function attachmentsOf(agentId: string): TaskAttachment[] {
-  return byPane[agentId] ?? [];
+  return app.attachmentsOf(agentId);
 }
 
 /** True once the asset protocol will serve this image to the webview. */
@@ -227,30 +189,11 @@ export function attach(agentId: string, paths: string[]): string[] {
   });
   if (fresh.length === 0) return [];
 
-  const list = byPane[agentId] ?? [];
-  const have = new Set(list.map((a) => a.path));
-  const added: TaskAttachment[] = [];
-  for (const path of fresh) {
-    // One chip per file, however many times its path is sent.
-    if (have.has(path)) continue;
-    have.add(path);
-    const item = makeAttachment(path);
-    added.push(item);
-    if (item.isImage) void grantThumbnail(path);
+  // Recorded on the AGENT, so the tray still knows what was sent after a restart.
+  for (const item of app.addAttachments(agentId, fresh)) {
+    if (item.isImage) void grantThumbnail(item.path);
   }
-  if (added.length > 0) byPane = { ...byPane, [agentId]: [...list, ...added] };
-  const text = fresh.map(quotePath).join(" ") + " ";
-  trace(`attach -> paste ${JSON.stringify(text)}`);
-  handle.paste(text);
-  // TEMP DIAGNOSTIC — read the terminal's own screen back, which is the only way to
-  // tell "we wrote it to the PTY" apart from "the agent actually took it".
-  setTimeout(() => {
-    try {
-      trace(`screen 500ms after paste:\n${handle.screen(6)}`);
-    } catch (err) {
-      trace(`screen read failed: ${String(err)}`);
-    }
-  }, 500);
+  handle.paste(fresh.map(quotePath).join(" ") + " ");
   return fresh;
 }
 
@@ -280,19 +223,26 @@ export function insertAtPrompt(agentId: string, text: string): "live" | "queued"
   return "queued";
 }
 
-/** Re-type one recorded attachment's path (the tray's click action). */
-export function insertAgain(agentId: string, path: string) {
-  panes.get(agentId)?.paste(quotePath(path) + " ");
-}
-
 export function forget(agentId: string, id: string) {
-  const list = byPane[agentId];
-  if (!list) return;
-  byPane = { ...byPane, [agentId]: list.filter((a) => a.id !== id) };
+  app.forgetAttachment(agentId, id);
 }
 
 export function forgetAll(agentId: string) {
-  byPane = { ...byPane, [agentId]: [] };
+  app.forgetAllAttachments(agentId);
+}
+
+/**
+ * Grant the asset protocol whatever images this agent already carries.
+ *
+ * The scope starts empty on every launch, so attachments RESTORED from disk have no
+ * grant behind them and would render as file glyphs until re-attached. Called by the
+ * tray when it shows an agent. A file that has since been deleted simply fails to
+ * grant and keeps its glyph — which is the honest answer.
+ */
+export function ensureThumbnails(agentId: string) {
+  for (const item of app.attachmentsOf(agentId)) {
+    if (item.isImage && !allowed.includes(item.path)) void grantThumbnail(item.path);
+  }
 }
 
 /**
@@ -370,7 +320,6 @@ async function attachDroppedCopies(agentId: string, files: File[]) {
       // Keep the reason — the common one is the 20MB copy limit, and "could not read
       // the file" would send someone hunting for a permissions problem they do not have.
       why = String(err instanceof Error ? err.message : err);
-      trace(`copy failed for ${file.name}: ${why}`);
       console.error("[Codesu] could not copy dropped file", file.name, err);
     }
   }
@@ -394,22 +343,17 @@ function paneAt(x: number, y: number): string | null {
 /**
  * The pane genuinely under a drag, or null.
  *
- * Tauri TYPES this position as physical pixels, and on Windows and Linux it is — but
- * on macOS it is not. wry builds it from `draggingLocation()` against the web view's
- * `frame()`, and an NSView frame is measured in POINTS, so what arrives here is
- * already CSS pixels. Dividing by the device pixel ratio on a Retina display
- * therefore halves a point that was never scaled, and the drop lands in the top-left
- * quadrant of the window — usually on a different pane, or on no pane at all.
- *
- * So: the raw point first (correct on macOS), the scaled one only as a fallback for
- * the platforms that really do report physical pixels.
+ * Tauri reports the position in PHYSICAL pixels, so it is divided by the device pixel
+ * ratio to reach the CSS pixels `elementFromPoint` expects. The raw point is tried
+ * afterwards only to cover a platform that reports CSS pixels already — on a Retina
+ * display it lands outside the viewport and simply misses.
  *
  * No further guessing here on purpose: this is the honest answer to "where is the
  * pointer", which is what `lastDragTarget` must record. Guessing belongs to the drop.
  */
 function paneUnder(position: { x: number; y: number }): string | null {
   const dpr = window.devicePixelRatio || 1;
-  return paneAt(position.x, position.y) ?? (dpr === 1 ? null : paneAt(position.x / dpr, position.y / dpr));
+  return paneAt(position.x / dpr, position.y / dpr) ?? paneAt(position.x, position.y);
 }
 
 /**
@@ -457,11 +401,10 @@ declare global {
  * has no teardown registered, so this is a no-op there.
  */
 if (typeof window !== "undefined" && window.__codesuFileDropTeardown) {
-  trace("handing over from a previous install");
   try {
     window.__codesuFileDropTeardown();
   } catch (err) {
-    trace(`teardown failed: ${String(err)}`);
+    console.warn("[Codesu] previous file-drop install would not tear down", err);
   }
   window.__codesuFileDropTeardown = undefined;
   window.__codesuFileDrop = undefined;
@@ -474,7 +417,6 @@ if (typeof window !== "undefined" && window.__codesuFileDropTeardown) {
  * COPIED to be usable. It then routes the paths to the pane under the pointer.
  */
 export function installFileDrop(): Promise<() => void> {
-  trace(`installFileDrop() called — already installed=${!!window.__codesuFileDrop}`);
   if (window.__codesuFileDrop) return window.__codesuFileDrop;
 
   /** Everything this install attached, so a hot reload can hand over cleanly. */
@@ -534,10 +476,6 @@ export function installFileDrop(): Promise<() => void> {
       // Cancelling every dragover is the DOM rule for "this is a drop target".
       // Without it WebKit shows the no-entry cursor and never fires `drop`.
       blockNativeDrag(e);
-      if (Date.now() - diagLastOver > 500) {
-        diagLastOver = Date.now();
-        trace(`DOM dragover @${e.clientX},${e.clientY} kinds=${Array.from(e.dataTransfer?.items ?? []).map((i) => i.kind).join("|")}`);
-      }
       if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
       const over = paneAt(e.clientX, e.clientY);
       if (over) lastDragTarget = over;
@@ -553,7 +491,6 @@ export function installFileDrop(): Promise<() => void> {
     "drop",
     (e: DragEvent) => {
       blockNativeDrag(e);
-      trace(`DOM drop @${e.clientX},${e.clientY} files=${e.dataTransfer?.files.length ?? 0} sinceNativeDrop=${Date.now() - nativeDropAt}ms`);
       clearTimeout(domDragIdle);
       clearDragPaint();
 
@@ -600,7 +537,6 @@ export function installFileDrop(): Promise<() => void> {
   );
 
   const listening = getCurrentWebview().onDragDropEvent(({ payload }) => {
-    trace(`NATIVE ${payload.type} ${JSON.stringify((payload as { position?: unknown }).position ?? null)} paths=${JSON.stringify((payload as { paths?: string[] }).paths ?? null)} dpr=${window.devicePixelRatio}`);
     /*
      * Tauri emits FOUR types: enter, over, drop, leave — and `enter` carries `paths`
      * exactly like `drop` does. Hence the explicit switch: an else-branch treating
@@ -637,7 +573,6 @@ export function installFileDrop(): Promise<() => void> {
         }
 
         const name = app.agents.find((a) => a.id === agentId)?.name ?? "agent";
-        trace(`NATIVE drop -> agent=${agentId} (${name}) live=${panes.has(agentId)}`);
         const sent = attach(agentId, paths);
         const count = `${paths.length} file${paths.length === 1 ? "" : "s"}`;
         if (sent.length > 0) report(`${count} → ${name}`, "ok");
@@ -652,11 +587,6 @@ export function installFileDrop(): Promise<() => void> {
         return;
     }
   });
-
-  void listening.then(
-    () => trace("native drag listener READY"),
-    (err) => trace(`native drag listener FAILED: ${String(err)}`),
-  );
 
   window.__codesuFileDropTeardown = () => {
     for (const off of undo) off();

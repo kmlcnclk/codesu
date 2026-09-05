@@ -1,6 +1,4 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
-// TEMP DIAGNOSTIC — remove with the rest of the drag & drop tracing.
-import { trace } from "./attachments.svelte";
 import { readScreenSignal, readSelectList, selectOptionAtRow } from "./claudeScreen";
 
 export interface TerminalHandle {
@@ -272,8 +270,9 @@ export async function createTerminal(
   // Send a chunk to the PTY and mirror it to the activity monitor.
   const write = (data: string) => {
     invoke("write_pty", { id, data }).catch((err) => {
-      // TEMP DIAGNOSTIC — a swallowed failure here is invisible by design.
-      trace(`write_pty FAILED id=${id}: ${String(err)}`);
+      // Never silently: a failed write means the agent did not receive what the user
+      // sent, and swallowing it is how a dropped attachment looks like nothing at all.
+      console.error("[Codesu] write to PTY failed", id, err);
     });
     options.onInput?.(data);
   };
@@ -581,7 +580,6 @@ export async function createTerminal(
       return rows.join("\n");
     },
     paste: (text: string) => {
-      trace(`handle.paste id=${id} len=${text.length}`);
       if (!text) return;
       // Bracketed paste, exactly as a terminal emulator delivers a real paste. The
       // prompt mirror can no longer model what is on screen after this, so drop

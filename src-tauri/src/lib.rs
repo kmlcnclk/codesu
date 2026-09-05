@@ -316,6 +316,77 @@ fn allow_asset(app: AppHandle, path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Read one attached file as text, for the in-app viewer.
+///
+/// Deliberately NOT `read_text_file`: that one is scoped to a workspace root, and an
+/// attachment routinely lives outside every workspace (a README dragged in from
+/// another checkout). Same size and binary guards; `refused` tells the UI to offer the
+/// system opener instead of pretending it can show the file.
+#[tauri::command]
+fn read_attachment(path: String) -> Result<FileContent, String> {
+    fsx::read_attachment(&path)
+}
+
+/// Extensions we refuse to hand to the system opener.
+///
+/// Opening a file with its default application is a "run this" gesture for anything
+/// the OS treats as executable, and this command is reachable from the webview. Images
+/// and documents are the point of the feature; scripts and app bundles are not.
+const UNOPENABLE_EXTENSIONS: &[&str] = &[
+    "app", "command", "sh", "bash", "zsh", "csh", "fish", "scpt", "scptd", "applescript",
+    "workflow", "action", "shortcut", "pkg", "mpkg", "dmg", "term", "webloc", "url",
+    "inetloc", "jar", "exe", "bat", "cmd", "com", "msi", "ps1", "vbs", "vbe", "js", "jse",
+    "wsf", "wsh", "scr", "cpl", "hta", "reg", "lnk",
+];
+
+/// Open one attached file with the system's default application.
+///
+/// This exists instead of the opener plugin's JS API because that API is gated by a
+/// STATIC path scope in the capability file, and attachments live anywhere on disk —
+/// the scope would have to be `**` to cover them, which hands the whole filesystem to
+/// anything running in the webview. Routing through Rust keeps the JS-facing scope
+/// closed and lets each call be checked on its merits, the same bargain `allow_asset`
+/// makes for thumbnails.
+///
+/// The path is not taken on trust:
+///
+///   - it must be absolute (a relative one resolves against the app's cwd),
+///   - it must resolve — following symlinks — to an existing REGULAR file, which also
+///     rules out `.app` bundles and every other directory,
+///   - neither the link nor its target may carry an extension the OS would execute,
+///     so a `notes.txt` symlinked to a shell script is refused on what it opens.
+#[tauri::command]
+fn open_attachment(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt as _;
+
+    let raw = std::path::Path::new(path.trim());
+    if !raw.is_absolute() {
+        return Err(format!("attachment path must be absolute: {}", raw.display()));
+    }
+    let target = std::fs::canonicalize(raw)
+        .map_err(|e| format!("cannot resolve attachment {}: {e}", raw.display()))?;
+    if !target.is_file() {
+        return Err(format!("not a regular file: {}", raw.display()));
+    }
+
+    let executable = |p: &std::path::Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .is_some_and(|e| UNOPENABLE_EXTENSIONS.contains(&e.as_str()))
+    };
+    if executable(raw) || executable(&target) {
+        return Err(format!(
+            "refusing to open an executable file: {}",
+            raw.display()
+        ));
+    }
+
+    app.opener()
+        .open_path(target.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -351,7 +422,9 @@ pub fn run() {
             read_text_file,
             write_text_file,
             save_pasted_file,
-            allow_asset
+            allow_asset,
+            open_attachment,
+            read_attachment
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
