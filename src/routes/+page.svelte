@@ -416,17 +416,15 @@
   <header class="titlebar" class:fullscreen={isFullscreen} data-tauri-drag-region>
     <span class="brand" title="Codesu">
       <!--
-        The wordmark alone read as a stray label floating beside the traffic lights.
-        Pairing it with the app's own mark (the C from the dock icon) turns it into a
-        lockup: a fixed shape the eye can anchor on, at the same visual weight as the
-        nav pills next to it rather than shouting over them.
+        The wordmark alone read as a stray label floating beside the traffic lights;
+        paired with the mark it becomes a lockup the eye can anchor on.
+
+        The mark is the shipped app icon itself (a copy of src-tauri/icons/128x128@2x.png),
+        never a redrawn approximation — the titlebar and the dock have to show the same
+        object. It carries its own squircle and transparent corners, so no tile, border or
+        radius is applied here; 256px of source keeps it crisp on retina.
       -->
-      <span class="mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
-          stroke-linecap="round">
-          <path d="M17.3 7.2a7 7 0 1 0 0 9.6" />
-        </svg>
-      </span>
+      <img class="mark" src="/brand-mark.png" alt="" aria-hidden="true" />
       <span class="wordmark">Codesu</span>
     </span>
 
@@ -647,27 +645,19 @@
   .brand {
     display: flex;
     align-items: center;
-    gap: 8px;
+    /* 6, not 8: the artwork's own canvas padding already contributes ~2px on its right. */
+    gap: 6px;
     /* Not a button: the whole lockup stays part of the window drag region. */
     pointer-events: none;
   }
   .mark {
     flex: none;
-    width: 19px;
-    height: 19px;
-    display: grid;
-    place-items: center;
-    border-radius: 6px;
-    color: var(--text);
-    background: linear-gradient(155deg, var(--surface-3), var(--surface-2));
-    border: 1px solid var(--border-strong);
-    /* A single top highlight is what keeps a 19px tile from reading as a flat blob. */
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  }
-  .mark svg {
-    width: 12px;
-    height: 12px;
+    width: 22px;
+    height: 22px;
     display: block;
+    /* The artwork's own body fills ~80% of its canvas (the macOS icon grid), so 22px of
+       box renders an ~18px tile — the size the wordmark next to it wants. */
+    object-fit: contain;
   }
   .wordmark {
     /* 700/0.4px was heavier and wider than every other label in the bar. The name is
