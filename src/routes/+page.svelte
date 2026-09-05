@@ -3,6 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { app } from "$lib/store/app.svelte";
+  import { installFileDrop } from "$lib/terminal/attachments.svelte";
   import ContextMenu, { type MenuItem } from "$lib/components/ContextMenu.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import TabBar from "$lib/components/TabBar.svelte";
@@ -112,6 +113,12 @@
     const un = listen<{ id: string; code: number | null }>("session-exited", (e) => {
       app.markExited(e.payload.id, e.payload.code);
     });
+    // The headless backend's equivalent. A separate event on purpose (see
+    // `agent::ExitPayload`) — the two kinds of session are torn down differently, and one
+    // listener that could not tell them apart would resume the wrong one.
+    const unAgent = listen<{ id: string; code: number | null }>("agent-exited", (e) => {
+      app.markExited(e.payload.id, e.payload.code);
+    });
 
     // Keep the titlebar inset in sync with fullscreen. Resize fires on the
     // enter/exit-fullscreen transition, so we re-check the flag there.
@@ -129,10 +136,19 @@
       await app.flush();
     });
 
+    // Files dropped from Finder onto an agent's pane. Installed once, at the window
+    // level, because Tauri delivers drags to the WINDOW (which is what makes real
+    // filesystem paths available); it then routes them to the pane under the pointer.
+    // installFileDrop() is idempotent — see the note on `installed` there — so it is
+    // deliberately NOT torn down here: doing so would unhook a listener a hot-reloaded
+    // remount still depends on.
+    void installFileDrop();
+
     return () => {
       window.removeEventListener("keydown", onKeydown);
       window.removeEventListener("focus", recheckPaths);
       un.then((f) => f());
+      unAgent.then((f) => f());
       unResize.then((f) => f()).catch(() => {});
       unClose.then((f) => f()).catch(() => {});
     };
@@ -294,6 +310,16 @@
 </script>
 
 <div class="app">
+  <!--
+    The violet corner wash. Anchored to the window's top-left and painted OVER the
+    chrome rather than inside the titlebar, so it crosses the bar's bottom edge as
+    one continuous light instead of stopping dead at it. It reaches only a little
+    past the bar on purpose: spread over the panel it tinted the tree rows and the
+    editor's corner, which is content, not chrome. Inert to the pointer, and below
+    the palette (60) / modals (100) / menus (200) so it never tints an overlay.
+  -->
+  <div class="corner-wash" aria-hidden="true"></div>
+
   <header class="titlebar" class:fullscreen={isFullscreen} data-tauri-drag-region>
     <span class="brand">Codesu</span>
 
@@ -448,6 +474,24 @@
     font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     color: var(--text);
   }
+  .corner-wash {
+    position: absolute;
+    top: 0;
+    left: 0;
+    /* Wide but shallow: the titlebar is 40px, so this clears it by ~16px and is
+       already transparent by its own bottom edge — no seam, no tinted rows. */
+    width: min(620px, 48%);
+    height: 56px;
+    pointer-events: none;
+    z-index: 30;
+    background: radial-gradient(
+      100% 100% at 0% 0%,
+      color-mix(in srgb, var(--hue-violet) 22%, transparent) 0%,
+      color-mix(in srgb, var(--hue-violet) 9%, transparent) 34%,
+      transparent 78%
+    );
+  }
+
   .titlebar {
     display: flex;
     align-items: center;

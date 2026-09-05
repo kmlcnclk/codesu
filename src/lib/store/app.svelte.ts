@@ -57,6 +57,12 @@ export interface Shortcut {
 export type AgentState = "working" | "blocked" | "done" | "idle" | "exited";
 
 /**
+ * The two agent interfaces. See {@link AppState.agentUi}.
+ * Persisted, so the choice survives a restart.
+ */
+export type AgentUi = "terminal" | "chat";
+
+/**
  * Priority ordering of agent states for the sidebar roster (see {@link AppStore.rosterOf}):
  * blocked → done → working → idle → exited. Within a group, most-recently-changed on
  * top (via `stateChangedAt`). This ordering is a hard rule and is preserved across app
@@ -426,6 +432,22 @@ class AppState {
   tabLayouts = $state<Record<string, LayoutNode>>({});
   /** Default project paths to pre-populate in workspace creation. */
   defaultProjects = $state<string[]>([]);
+  /**
+   * Which interface a Claude agent's pane presents — the setting behind Settings →
+   * Agent interface.
+   *
+   *  - `"terminal"` — Claude Code's own TUI in xterm. Every affordance the CLI has
+   *    (the `/` picker, `@` autocomplete, permission prompts, plan approval) works,
+   *    because it IS the CLI. Turn state is read off the rendered screen.
+   *  - `"chat"` — a headless `claude -p --output-format stream-json` whose frames this
+   *    app renders itself. Turn state is exact rather than inferred, but the prompts the
+   *    TUI answers for us have nowhere to go, so it runs in a permission mode that never
+   *    asks (see `createAgentSession`).
+   *
+   * Both are the same binary and the same session: switching does not fork the
+   * conversation, and either mode can `--resume` what the other started.
+   */
+  agentUi = $state<AgentUi>("terminal");
   /** System terminal scroll position memory. */
   terminalScrollPos = $state(0);
   /** Keyboard shortcuts configuration. */
@@ -445,9 +467,12 @@ class AppState {
   lastClosed = $state<ClosedAgent | null>(null);
   /** Width (px) of the left sidebar rail — user-resizable, persisted. */
   sidebarWidth = $state(268);
-  /** Fraction (0–1) of the sidebar's list area given to the Workspaces section;
-   * the Agents section takes the rest. User-resizable, persisted. */
-  workspacesRatio = $state(0.42);
+  /**
+   * Workspaces whose agent children are collapsed in the sidebar tree, by id.
+   * Absent / false means expanded — a new workspace shows its agents by default.
+   * Persisted so the tree looks the same after a restart.
+   */
+  wsCollapsed = $state<Record<string, boolean>>({});
   /** Width (px) of the Notes page's note-list pane — user-resizable, persisted. */
   notesListWidth = $state(296);
 
@@ -1976,6 +2001,33 @@ class AppState {
     if (a) a.lastUsedAt = Date.now();
   }
 
+  /**
+   * Ground truth for a HEADLESS agent (see {@link agentUi}): the pane reports the turn
+   * state its frame stream says it is in.
+   *
+   * The terminal path cannot do this — it has only rendered text, so
+   * {@link tickMonitor} polls a screen reader, debounces the reading, and derives the
+   * state. Here a `result` frame IS "done", so the state is committed directly and there
+   * is nothing to settle. A headless agent registers no screen, so `tickMonitor` skips it
+   * and the two paths never fight over one agent.
+   *
+   * The chime rules stay the same — one per transition — which a state change gives for
+   * free, since `commitState` ignores a repeat of the current state.
+   */
+  reportTurnState(id: string, next: AgentState) {
+    const a = this.agents.find((x) => x.id === id);
+    if (!a || a.state === next) return;
+    const now = Date.now();
+    if (next === "working") {
+      a.acknowledged = false;
+      a.lastUsedAt = now;
+      this.recordActivity("agent", a.id, a.name, "worked", a.workspaceId);
+    }
+    if (next === "blocked") playBlocked();
+    else if (next === "done") playDone();
+    this.commitState(a, next, now);
+  }
+
   private ensureMonitor() {
     if (this.monitorTimer || typeof window === "undefined") return;
     this.monitorTimer = setInterval(() => this.tickMonitor(), MONITOR_TICK_MS);
@@ -2160,6 +2212,28 @@ class AppState {
     }
   }
 
+  /**
+   * Switch the agent interface.
+   *
+   * Every live Claude process belongs to the backend being switched away from, so each
+   * one is SLEPT (see {@link sleepAgent}) — the process goes, the session stays, and the
+   * pane falls back to its Resume placeholder in the new interface.
+   *
+   * Sleeping rather than restarting is the point: a session is never resumed except on an
+   * explicit Resume click, and flipping this setting must not become a back door that
+   * silently restarts a dozen agents. Shell and custom agents are untouched — they only
+   * ever run in a terminal.
+   */
+  setAgentUi(mode: AgentUi) {
+    if (mode === this.agentUi) return;
+    this.agentUi = mode;
+    for (const a of this.agents) {
+      if (a.kind !== "claude") continue;
+      if (this.launchedAgentIds.has(a.id)) this.sleepAgent(a.id);
+    }
+    this.persist();
+  }
+
   // ---------- layout ----------
 
   /** Clamp + persist the sidebar rail width. */
@@ -2168,9 +2242,25 @@ class AppState {
     this.persist();
   }
 
-  /** Clamp + persist the Workspaces/Agents split ratio. */
-  setWorkspacesRatio(ratio: number) {
-    this.workspacesRatio = Math.max(0.12, Math.min(0.85, ratio));
+  /** Expanded ⇄ collapsed for one workspace's agent children in the sidebar tree. */
+  toggleWorkspaceCollapsed(id: string) {
+    this.wsCollapsed[id] = !this.wsCollapsed[id];
+    this.persist();
+  }
+  /** Force one workspace's agent children open (used when its row is selected). */
+  expandWorkspace(id: string) {
+    if (!this.wsCollapsed[id]) return;
+    this.wsCollapsed[id] = false;
+    this.persist();
+  }
+  /**
+   * Fold / unfold the whole tree in one write — a per-workspace loop would persist
+   * once per row.
+   */
+  setAllWorkspacesCollapsed(collapsed: boolean) {
+    const next: Record<string, boolean> = {};
+    if (collapsed) for (const w of this.liveWorkspaces) next[w.id] = true;
+    this.wsCollapsed = next;
     this.persist();
   }
 
@@ -2278,6 +2368,7 @@ class AppState {
       activeTabByWs: this.activeTabByWs,
       tabLayouts: this.liveTabLayouts(),
       defaultProjects: this.defaultProjects,
+      agentUi: this.agentUi,
       terminalScrollPos: this.terminalScrollPos,
       shortcuts: this.shortcuts,
       pageViews: this.pageViews,
@@ -2285,7 +2376,7 @@ class AppState {
       lastNoteId: this.lastNoteId,
       lastClosed: this.lastClosed,
       sidebarWidth: this.sidebarWidth,
-      workspacesRatio: this.workspacesRatio,
+      wsCollapsed: this.wsCollapsed,
       notesListWidth: this.notesListWidth,
       codeOpenByWs: this.codeOpenByWs,
       codeSideTab: this.codeSideTab,
@@ -2455,6 +2546,9 @@ class AppState {
         this.tabLayouts =
           data.tabLayouts && typeof data.tabLayouts === "object" ? data.tabLayouts : {};
         this.defaultProjects = Array.isArray(data.defaultProjects) ? data.defaultProjects : [];
+        // Unknown values fall back to the terminal — the mode that has every
+        // affordance — rather than stranding the user in the reduced one.
+        this.agentUi = data.agentUi === "chat" ? "chat" : "terminal";
         this.terminalScrollPos = typeof data.terminalScrollPos === "number" ? data.terminalScrollPos : 0;
         // Load shortcuts with merge of defaults to catch new/updated shortcuts
         const defaults = this.getDefaultShortcuts();
@@ -2493,8 +2587,8 @@ class AppState {
         // Load persisted layout sizes (with sane clamps).
         if (typeof data.sidebarWidth === "number")
           this.sidebarWidth = Math.max(180, Math.min(560, data.sidebarWidth));
-        if (typeof data.workspacesRatio === "number")
-          this.workspacesRatio = Math.max(0.12, Math.min(0.85, data.workspacesRatio));
+        if (data.wsCollapsed && typeof data.wsCollapsed === "object")
+          this.wsCollapsed = { ...data.wsCollapsed };
         if (typeof data.notesListWidth === "number")
           this.notesListWidth = Math.max(200, Math.min(560, data.notesListWidth));
         // Code view: only the open-file PATHS are restored — each buffer is re-read from

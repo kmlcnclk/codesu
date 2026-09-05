@@ -17,3 +17,6 @@ vite.config.ts.timestamp-*
 
 # Local, machine-specific Claude Code settings
 .claude/settings.local.json
+
+# Local git worktree checkouts
+/.worktrees/

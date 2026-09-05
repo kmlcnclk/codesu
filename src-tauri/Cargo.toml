@@ -34,6 +34,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = "0.9"
 libc = "0.2"
+# Clipboard images cross the IPC bridge base64-encoded (see fsx::save_pasted_file).
+base64 = "0.22"
 
 # Shipping profile. Without it the bundled .app carries a debug-assertion-free but
 # otherwise unoptimized binary, several times larger than it needs to be.

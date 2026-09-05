@@ -14,6 +14,13 @@ export interface TerminalHandle {
    * `baseY`, so the user scrolling back never changes the result.
    */
   screen: (maxRows?: number) => string;
+  /**
+   * Insert text at the agent's prompt as if it had been pasted — used for dropped
+   * file paths and clipboard attachments. Sent inside bracketed-paste markers so
+   * `claude` treats it as pasted content rather than as typing (no autocomplete,
+   * no per-character interpretation).
+   */
+  paste: (text: string) => void;
   /** Get current scroll position (buffer line where viewport top is). */
   getScrollPosition: () => number;
   /** Set scroll position (buffer line to scroll to). */
@@ -567,6 +574,15 @@ export async function createTerminal(
         if (line) rows.push(line.translateToString(true));
       }
       return rows.join("\n");
+    },
+    paste: (text: string) => {
+      if (!text) return;
+      // Bracketed paste, exactly as a terminal emulator delivers a real paste. The
+      // prompt mirror can no longer model what is on screen after this, so drop
+      // `trackable` — the same rule the onData handler applies to a user paste.
+      trackable = false;
+      write(`\x1b[200~${text}\x1b[201~`);
+      term.focus();
     },
     getScrollPosition: () => {
       // Get the current scroll position from the viewport

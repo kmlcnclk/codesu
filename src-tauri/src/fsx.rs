@@ -248,3 +248,137 @@ pub fn write_text_file(
     let meta = std::fs::metadata(&file).map_err(|e| format!("cannot stat {}: {e}", file.display()))?;
     Ok(modified_ms(&meta))
 }
+
+
+// ---------- clipboard attachments ----------
+
+/// Largest pasted attachment accepted, decoded. Claude reads these off disk, so the
+/// cap is about not silently filling the temp dir with a stray 100MB paste.
+const MAX_PASTE_BYTES: usize = 20 * 1024 * 1024;
+
+/// Where pasted attachments land. Outside any workspace on purpose: a paste is not a
+/// project file, and writing one into the repo would show up in the agent's own
+/// `git status`.
+fn paste_dir() -> PathBuf {
+    std::env::temp_dir().join("codesu-pastes")
+}
+
+/// Write a clipboard image to a temp file and return its absolute path.
+///
+/// A pasted image has no path, and an agent needs one, so the bytes have to land on
+/// disk before they can be attached.
+///
+/// The bytes arrive base64-encoded because the alternative — a JSON array of numbers —
+/// inflates a 2MB screenshot into a ~7MB IPC message. `ext` is sanitised rather than
+/// trusted: it reaches a filename, and it comes from a MIME type the webview handed us.
+pub fn save_pasted_file(data_b64: &str, ext: &str) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.trim())
+        .map_err(|e| format!("cannot decode paste: {e}"))?;
+    if bytes.is_empty() {
+        return Err("empty paste".into());
+    }
+    if bytes.len() > MAX_PASTE_BYTES {
+        return Err(format!(
+            "paste is {:.1}MB — the limit is {}MB",
+            bytes.len() as f64 / (1024.0 * 1024.0),
+            MAX_PASTE_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let ext: String = ext
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let ext = if ext.is_empty() { "png".to_string() } else { ext };
+
+    let dir = paste_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+
+    // Timestamp + counter: a name a person can recognise in the prompt.
+    //
+    // Claimed with create_new (O_EXCL), NOT exists()-then-write: two panes pasting in
+    // the same millisecond both pass an existence check, and the second write then
+    // silently replaces the first one's image.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    for n in 0..1000 {
+        let file = if n == 0 {
+            dir.join(format!("paste-{stamp}.{ext}"))
+        } else {
+            dir.join(format!("paste-{stamp}-{}.{ext}", n + 1))
+        };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&file) {
+            Ok(mut handle) => {
+                use std::io::Write as _;
+                handle
+                    .write_all(&bytes)
+                    .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+                return Ok(file.to_string_lossy().into_owned());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot create {}: {e}", file.display())),
+        }
+    }
+    Err("could not find a free name for the paste".into())
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn writes_the_decoded_bytes_and_returns_the_path() {
+        let png = [0x89u8, b'P', b'N', b'G', 1, 2, 3];
+        let path = save_pasted_file(&b64(&png), "png").expect("should save");
+        assert!(path.ends_with(".png"), "kept the extension: {path}");
+        assert_eq!(std::fs::read(&path).unwrap(), png, "bytes round-trip");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sanitises_the_extension_it_is_handed() {
+        // A MIME subtype like "svg+xml", or anything path-ish, must not reach the name.
+        let path = save_pasted_file(&b64(b"x"), "../../etc/pas swd").expect("should save");
+        let name = Path::new(&path).file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("paste-"), "name is ours: {name}");
+        assert!(name.ends_with(".etcpassw"), "alnum-only, capped at 8: {name}");
+        assert_eq!(name.matches('.').count(), 1, "no extra path parts: {name}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn falls_back_to_png_when_the_extension_is_unusable() {
+        let path = save_pasted_file(&b64(b"x"), "///").expect("should save");
+        assert!(path.ends_with(".png"), "{path}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_empty_and_undecodable_pastes() {
+        assert!(save_pasted_file("", "png").is_err(), "empty");
+        assert!(save_pasted_file("!!!not base64!!!", "png").is_err(), "garbage");
+    }
+
+    #[test]
+    fn two_pastes_in_the_same_millisecond_do_not_collide() {
+        let a = save_pasted_file(&b64(b"a"), "png").unwrap();
+        let b = save_pasted_file(&b64(b"b"), "png").unwrap();
+        assert_ne!(a, b, "distinct paths");
+        assert_eq!(std::fs::read(&a).unwrap(), b"a");
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+    }
+}
