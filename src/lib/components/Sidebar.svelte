@@ -50,6 +50,8 @@
     });
   });
 
+  let hits = $derived(rows.reduce((n, r) => n + r.roster.length, 0));
+
   function toggleSearch() {
     searching = !searching;
     if (!searching) query = "";
@@ -401,19 +403,33 @@
     </header>
 
     {#if searching}
-      <div class="search">
-        <Icon name="search" size={13} />
+      <div class="search" class:filled={!!q}>
+        <span class="search-icon" aria-hidden="true"><Icon name="search" size={13} /></span>
         <input
           bind:this={searchEl}
           bind:value={query}
           use:focusOnMount
+          type="text"
           placeholder="Filter…"
+          aria-label="Filter workspaces and agents"
           spellcheck="false"
+          autocomplete="off"
+          autocapitalize="off"
+          autocorrect="off"
           onkeydown={searchKey}
         />
-        {#if query}
-          <button class="clear" title="Clear filter" aria-label="Clear filter" onclick={() => { query = ""; searchEl?.focus(); }}>
-            <Icon name="close" size={12} />
+        {#if q}
+          <span class="hits" title="{hits} agent(s) shown">{hits}</span>
+          <button
+            class="clear"
+            title="Clear filter (Esc)"
+            aria-label="Clear filter"
+            onclick={() => {
+              query = "";
+              searchEl?.focus();
+            }}
+          >
+            <Icon name="close" size={11} />
           </button>
         {/if}
       </div>
@@ -757,30 +773,57 @@
     color: var(--text);
   }
   .head-act.on {
-    background: var(--accent-soft);
+    background: var(--accent-softer);
     color: var(--accent);
   }
 
-  /* ---- filter field ---- */
+  /* ---- filter field ----
+     The WRAPPER is the field; the input inside it is just text. app.css gives
+     every :focus-visible element a ring, which on a borderless input drew a
+     second, square ring inside the rounded one — so the input's ring is dropped
+     and the wrapper wears the app's own focus treatment instead. */
   .search {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
-    gap: 5px;
-    margin: 0 6px 5px;
-    padding: 0 5px 0 7px;
-    height: 26px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
+    gap: 6px;
+    /* Flush with the rows' own 4px gutter, so the field lines up with the list
+       it filters rather than floating 2px inside it. */
+    margin: 0 4px 6px;
+    padding: 0 4px 0 7px;
+    height: 28px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    /* At rest it reads as a recessed well, not a bordered box — one less line in
+       a panel whose whole job is to stay behind its content. */
+    background: var(--surface-3);
     color: var(--text-faint);
+    transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+  }
+  .search:hover {
+    background: var(--surface-4);
   }
   .search:focus-within {
+    background: var(--bg);
     border-color: var(--accent-line);
+    box-shadow: var(--ring);
+  }
+  .search-icon {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    color: var(--text-ghost);
+    transition: color 0.12s;
+  }
+  .search:focus-within .search-icon,
+  .search.filled .search-icon {
+    color: var(--accent);
   }
   .search input {
     flex: 1;
     min-width: 0;
+    height: 100%;
+    padding: 0;
     border: 0;
     outline: none;
     background: transparent;
@@ -788,21 +831,35 @@
     font-size: 12.5px;
     color: var(--text);
   }
+  /* The wrapper already shows focus; a ring on the input would double it. */
+  .search input:focus-visible {
+    box-shadow: none;
+  }
   .search input::placeholder {
     color: var(--text-ghost);
   }
+  /* What the filter caught, in the field's own dead space. */
+  .hits {
+    flex: 0 0 auto;
+    padding: 0 1px;
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-ghost);
+  }
   .clear {
-    width: 17px;
-    height: 17px;
+    width: 18px;
+    height: 18px;
     flex-shrink: 0;
     padding: 0;
     display: grid;
     place-items: center;
     border: 0;
-    border-radius: 4px;
+    border-radius: 50%;
     background: transparent;
     color: var(--text-faint);
     cursor: pointer;
+    transition: background 0.12s, color 0.12s;
   }
   .clear:hover {
     background: var(--surface-4);
