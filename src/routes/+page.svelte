@@ -113,12 +113,6 @@
     const un = listen<{ id: string; code: number | null }>("session-exited", (e) => {
       app.markExited(e.payload.id, e.payload.code);
     });
-    // The headless backend's equivalent. A separate event on purpose (see
-    // `agent::ExitPayload`) — the two kinds of session are torn down differently, and one
-    // listener that could not tell them apart would resume the wrong one.
-    const unAgent = listen<{ id: string; code: number | null }>("agent-exited", (e) => {
-      app.markExited(e.payload.id, e.payload.code);
-    });
 
     // Keep the titlebar inset in sync with fullscreen. Resize fires on the
     // enter/exit-fullscreen transition, so we re-check the flag there.
@@ -148,7 +142,6 @@
       window.removeEventListener("keydown", onKeydown);
       window.removeEventListener("focus", recheckPaths);
       un.then((f) => f());
-      unAgent.then((f) => f());
       unResize.then((f) => f()).catch(() => {});
       unClose.then((f) => f()).catch(() => {});
     };

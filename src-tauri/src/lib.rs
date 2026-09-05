@@ -1,4 +1,3 @@
-mod agent;
 mod claude_home;
 mod editor;
 mod fsx;
@@ -9,7 +8,6 @@ mod search;
 mod store;
 mod testing;
 
-use agent::{AgentFrame, AgentManager};
 use fsx::{DirEntry, FileContent};
 use git::{RepoStatus, Worktree};
 use runner::Script;
@@ -63,57 +61,6 @@ fn resize_pty(manager: State<PtyManager>, id: String, cols: u16, rows: u16) -> R
 /// Kill a PTY session.
 #[tauri::command]
 fn kill_pty(manager: State<PtyManager>, id: String) {
-    manager.kill(&id);
-}
-
-// ---------- Headless agent commands ----------
-//
-// The PTY commands above and these are two backends for the SAME child program. A pane
-// picks one: a terminal-rendered `claude` (start_pty) or a headless one whose JSON frames
-// the UI renders itself (start_agent). Shell panes and the script runner stay on the PTY.
-
-/// Start a headless `claude` and begin streaming its JSON frames over `on_data`.
-#[allow(clippy::too_many_arguments)]
-#[tauri::command]
-fn start_agent(
-    app: AppHandle,
-    manager: State<AgentManager>,
-    id: String,
-    session_id: String,
-    cwd: Option<String>,
-    prompt: Option<String>,
-    permission_mode: Option<String>,
-    partial_messages: Option<bool>,
-    env: Option<HashMap<String, String>>,
-    on_data: Channel<Vec<AgentFrame>>,
-) -> Result<(), String> {
-    manager.spawn(
-        app,
-        id,
-        session_id,
-        cwd,
-        prompt,
-        permission_mode,
-        partial_messages.unwrap_or(false),
-        env,
-        on_data,
-    )
-}
-
-/// Send one user message to a headless agent.
-///
-/// Sync for the same reason as `write_pty`: sync commands run on the main thread one after
-/// another, and that serialisation is what keeps turns in order. Two rapid invokes
-/// dispatched onto a thread pool could interleave their writes and corrupt the JSON lines
-/// on the child's stdin.
-#[tauri::command]
-fn send_agent(manager: State<AgentManager>, id: String, text: String) -> Result<(), String> {
-    manager.send(&id, &text)
-}
-
-/// Kill a headless agent session.
-#[tauri::command]
-fn kill_agent(manager: State<AgentManager>, id: String) {
     manager.kill(&id);
 }
 
@@ -375,15 +322,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(PtyManager::default())
-        .manage(AgentManager::default())
         .invoke_handler(tauri::generate_handler![
             start_pty,
             write_pty,
             resize_pty,
             kill_pty,
-            start_agent,
-            send_agent,
-            kill_agent,
             create_worktree,
             list_worktrees,
             remove_worktree,
@@ -415,13 +358,8 @@ pub fn run() {
         .run(|app_handle, event| {
             // Ensure no child processes are orphaned when the app quits.
             if let RunEvent::ExitRequested { .. } = event {
-                let pty: State<PtyManager> = app_handle.state();
-                pty.kill_all();
-                // Both backends, or the quit orphans whichever one is missed. Each waits
-                // only as long as it actually has children, so with none open this costs
-                // nothing (see `wait_for_exit`).
-                let agents: State<AgentManager> = app_handle.state();
-                agents.kill_all();
+                let manager: State<PtyManager> = app_handle.state();
+                manager.kill_all();
             }
         });
 }
