@@ -20,17 +20,24 @@
    * The hue family is IntelliJ IDEA's "New UI" dark (neutral grey, not blue), sitting one
    * notch below the IDE's own #1e1f22 / #2b2d30 — the same relationships, less light.
    *
-   * The previous ramp started at #090b10, near black. It looked striking empty, but this
-   * app frames other people's colours — a terminal, a diff, syntax highlighting — and
-   * against near-black those glare while the app's own panels lose their edges.
+   * The ramp starts at #131416, not at the near-black #090b10 an earlier version used:
+   * this app frames other people's colours — a terminal, a diff, syntax highlighting —
+   * and against near-black those glare while the app's own panels lose their edges.
    */
-  --bg: #16171a; /* app base — the canvas plane */
-  --surface-1: #1c1d20; /* titlebar, sidebar, tool windows */
-  --surface-2: #1f2023; /* tabbar, secondary panels */
+  /*
+   * The chrome planes — base, titlebar, sidebar, tab strip — all sit on ONE tone,
+   * the same #131416 as the terminal canvas, so the window reads as a single dark
+   * frame instead of four stacked greys. Separation between them comes from
+   * --border hairlines; separation of *interactive* things (chips, hover, active,
+   * popovers) comes from the raised tones below, which is why those stay lighter.
+   */
+  --bg: #131416; /* app base — the canvas plane */
+  --surface-1: #131416; /* titlebar, sidebar, tab strip, tool windows */
+  --surface-2: #191a1d; /* raised chips (tabs), secondary panels, fields */
   --surface-3: #26282c; /* hover / raised */
   --surface-4: #313338; /* active / pressed */
   --surface-float: #212226; /* menus, modals, popovers */
-  --term-bg: #131416; /* terminal / editor canvas — inset below the base */
+  --term-bg: #131416; /* terminal / editor canvas */
 
   /* ---- Borders ---- */
   --border: #2b2d31; /* default hairline */

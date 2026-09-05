@@ -1,0 +1,6 @@
+# esbuild's install script links the platform-native binary that vite's bundler needs.
+# pnpm 11 no longer reads the `pnpm.onlyBuiltDependencies` field in package.json, so the
+# allowance lives here — without it every `pnpm install` exits non-zero
+# (ERR_PNPM_IGNORED_BUILDS), which takes `tauri dev`'s beforeDevCommand down with it.
+allowBuilds:
+  esbuild: true

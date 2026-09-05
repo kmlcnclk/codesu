@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from "$lib/store/app.svelte";
   import TerminalPane from "./TerminalPane.svelte";
+  import AgentChatPane from "./AgentChatPane.svelte";
   import Icon from "./Icon.svelte";
   import { computeLayout, GUTTER_PX, type Gutter } from "$lib/terminal/layout";
 
@@ -73,14 +74,35 @@
     </div>
   {:else}
     {#each app.mountedAgents as agent (agent.id)}
-      <TerminalPane
-        {agent}
-        rect={rects[agent.id]}
-        visible={!!rects[agent.id]}
-        focused={agent.id === app.activeAgent?.id}
-        showHeader={app.agentsInGroup(agent.groupId).length > 1}
-        cwd={app.cwdOf(agent)}
-      />
+      <!--
+        The two interfaces (see AppState.agentUi). Chat mode applies to CLAUDE agents
+        only: a shell or custom agent has no JSON protocol to render, so it always gets a
+        real terminal regardless of the setting.
+
+        Both components take the same props and occupy the same rect, so the split grid,
+        the gutters below and the store contract are identical either way. Switching the
+        setting sleeps every live Claude agent (see AppState.setAgentUi), so no pane is
+        ever asked to swap backends under a running process.
+      -->
+      {#if app.agentUi === "chat" && agent.kind === "claude"}
+        <AgentChatPane
+          {agent}
+          rect={rects[agent.id]}
+          visible={!!rects[agent.id]}
+          focused={agent.id === app.activeAgent?.id}
+          showHeader={app.agentsInGroup(agent.groupId).length > 1}
+          cwd={app.cwdOf(agent)}
+        />
+      {:else}
+        <TerminalPane
+          {agent}
+          rect={rects[agent.id]}
+          visible={!!rects[agent.id]}
+          focused={agent.id === app.activeAgent?.id}
+          showHeader={app.agentsInGroup(agent.groupId).length > 1}
+          cwd={app.cwdOf(agent)}
+        />
+      {/if}
     {/each}
 
     <!-- Draggable dividers between split panes. -->

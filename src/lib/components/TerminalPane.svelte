@@ -3,6 +3,21 @@
   import { invoke } from "@tauri-apps/api/core";
   import { createTerminal, type TerminalHandle } from "$lib/terminal/createTerminal";
   import { app, shellQuote, STATE_META, type Agent } from "$lib/store/app.svelte";
+  import {
+    attach,
+    attachBlob,
+    attachmentsOf,
+    dragState,
+    forget,
+    forgetAll,
+    insertAgain,
+    isThumbnailable,
+    notices,
+    pickFiles,
+    registerPane,
+    thumbnailSrc,
+  } from "$lib/terminal/attachments.svelte";
+  import { openPath } from "@tauri-apps/plugin-opener";
   import type { Rect } from "$lib/terminal/layout";
   import Icon from "./Icon.svelte";
 
@@ -135,6 +150,8 @@
         return;
       }
       handle = term;
+      // Let dropped files and pasted images reach this pane's prompt.
+      registerPane(agent.id, term);
       // Hand the activity monitor a window onto this terminal's live screen — that is
       // what working / blocked / done are read from (see AppState.tickMonitor).
       app.registerScreen(agent.id, (rows) => handle?.screen(rows) ?? "");
@@ -195,6 +212,7 @@
     // Drop the screen reader first: once the terminal is gone the monitor has no
     // ground truth, and it must leave this agent's state alone rather than guess.
     app.unregisterScreen(agent.id);
+    registerPane(agent.id, null);
     handle?.dispose();
     handle = undefined;
   }
@@ -205,6 +223,124 @@
   });
 
   onDestroy(teardown);
+
+  // ---------- attachments ----------
+
+  const attached = $derived(attachmentsOf(agent.id));
+  /** e.g. files dropped on a dormant pane, waiting for it to be resumed. */
+  const notice = $derived(notices[agent.id] ?? null);
+  const dragOver = $derived(dragState.agentId === agent.id);
+  /**
+   * The attachments panel is CLOSED until you open it, and it lives off the right
+   * edge — a full-width bar across the bottom sat on top of the agent's own output,
+   * and no amount of translucency fixes text over text.
+   *
+   * It never opens itself. New attachments announce themselves on the handle instead
+   * (a count, and one pulse), so the panel appearing is always something you asked
+   * for and never something that covers output while you are reading it.
+   */
+  let trayOpen = $state(false);
+  let busy = $state(false);
+  let failure = $state<string | null>(null);
+
+  function fail(err: unknown, what: string) {
+    console.error(`[Codesu] ${what}`, err);
+    failure = String(err instanceof Error ? err.message : err);
+    setTimeout(() => (failure = null), 5000);
+  }
+
+  async function addFiles() {
+    busy = true;
+    try {
+      await pickFiles(agent.id);
+    } catch (err) {
+      fail(err, "file picker failed");
+    } finally {
+      busy = false;
+    }
+  }
+
+  /**
+   * THE paste handler for this pane — it takes the whole gesture, text and images
+   * alike, and xterm never sees it.
+   *
+   * That total ownership is the fix for the duplicate-attachment bug, and the reason
+   * is worth writing down. One ⌘V of a screenshot reaches the webview as MORE THAN
+   * ONE paste event (macOS offers the clipboard item in several flavours). Every
+   * event that gets through to the terminal makes `claude` read the clipboard again,
+   * so one paste arrived as `[Image #5] [Image #6]` — two attachments, one image.
+   * Leaving any of them to xterm reopens that, so:
+   *
+   *   - images  -> written to a temp file, attached once, recorded in the tray
+   *   - text    -> re-sent by us as a bracketed paste (what xterm would have done)
+   *   - repeats -> collapsed: identical content within 1.5s is one paste
+   */
+  let lastPaste = { key: "", at: 0 };
+
+  /** True when this exact payload was already pasted a moment ago. */
+  function isRepeat(key: string): boolean {
+    const now = Date.now();
+    if (key === lastPaste.key && now - lastPaste.at < 1500) return true;
+    lastPaste = { key, at: now };
+    return false;
+  }
+
+  async function onPaste(e: ClipboardEvent) {
+    if (!handle) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const data = e.clipboardData;
+    const item = Array.from(data?.items ?? []).find(
+      (i) => i.kind === "file" && i.type.startsWith("image/"),
+    );
+    const image = item?.getAsFile();
+
+    if (image) {
+      if (isRepeat(`img:${image.name}:${image.size}:${image.type}`)) return;
+      busy = true;
+      try {
+        await attachBlob(agent.id, image);
+      } catch (err) {
+        fail(err, "could not attach the pasted image");
+      } finally {
+        busy = false;
+      }
+      return;
+    }
+
+    const text = data?.getData("text/plain") ?? "";
+    if (!text) return;
+    if (isRepeat(`txt:${text}`)) return;
+    // A pasted path is an attachment too — record it so the tray shows it.
+    if (/^\/\S+$/.test(text.trim()) && attach(agent.id, [text.trim()]).length > 0) return;
+    handle.paste(text);
+  }
+
+  /*
+   * Announce a new attachment on the handle: one pulse, plus the count that is always
+   * there. A drop is handled by the window-level listener rather than by this
+   * component, so the signal comes from watching the list grow — which also covers
+   * pastes and the picker, one rule for all three.
+   */
+  let pulse = $state(false);
+  let seen = -1;
+  let pulseTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const n = attached.length;
+    // The first run only records the starting length; it must not pulse for
+    // attachments that were already there.
+    if (seen >= 0 && n > seen) {
+      pulse = true;
+      clearTimeout(pulseTimer);
+      pulseTimer = setTimeout(() => (pulse = false), 1400);
+    }
+    seen = n;
+  });
+
+  function reveal(path: string) {
+    openPath(path).catch((err) => fail(err, "could not open the attachment"));
+  }
 
   function focus() {
     app.setActiveAgent(agent.id);
@@ -230,13 +366,25 @@
 <!-- Clicking into the pane focuses it and marks a finished (done) agent as reviewed
      → idle. Blocked agents are unaffected (they clear only when Claude resumes). -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="pane" class:visible class:focused class:split={showHeader} {style} onpointerdown={focus}>
+<div
+  class="pane"
+  class:visible
+  class:focused
+  class:split={showHeader}
+  {style}
+  data-agent-id={agent.id}
+  onpointerdown={focus}
+  onpastecapture={onPaste}
+>
   <div class="card">
   {#if showHeader}
     <div class="head">
       <span class="dot" data-state={agent.state} style="--state:{meta.color}" title={meta.label}></span>
       <span class="pane-name">{agent.name}</span>
       <div class="actions">
+        <button class="act" title="Attach files" aria-label="Attach files" onclick={(e) => { e.stopPropagation(); addFiles(); }}>
+          <Icon name="paperclip" size={14} />
+        </button>
         <button class="act" title="Split side by side (⌘D)" aria-label="Split side by side" onclick={(e) => { e.stopPropagation(); splitRow(); }}>
           <Icon name="columns" size={14} />
         </button>
@@ -256,6 +404,126 @@
 
   <div class="term-wrap">
     <div class="term" bind:this={container}></div>
+
+    <!--
+      Attachments. A collapsed handle on the RIGHT edge, and a popover above it —
+      the terminal keeps its full width and nothing is painted over the agent's
+      output. The terminal only ever shows the path an agent was handed
+      (paste-1788….png tells you nothing), so this is where you see what you sent.
+    -->
+    {#if started || notice}
+      {#if trayOpen}
+        <div class="tray">
+          <header class="tray-head">
+            <span class="tray-title">
+              Attachments{attached.length > 0 ? ` · ${attached.length}` : ""}
+            </span>
+            <button
+              class="tray-x"
+              title="Close"
+              aria-label="Close attachments"
+              onclick={(e) => { e.stopPropagation(); trayOpen = false; }}
+            >
+              <Icon name="close" size={12} />
+            </button>
+          </header>
+
+          <button
+            class="tray-add"
+            title="Attach files to {agent.name}"
+            onclick={(e) => { e.stopPropagation(); addFiles(); }}
+          >
+            <Icon name="paperclip" size={12} />
+            <span>Attach files</span>
+          </button>
+
+          {#if failure}
+            <p class="tray-msg failed">{failure}</p>
+          {:else if notice}
+            <p class="tray-msg waiting">{notice}</p>
+          {:else if busy}
+            <p class="tray-msg">Attaching…</p>
+          {:else if attached.length === 0}
+            <p class="tray-msg">Nothing yet. Drop files on this pane, or ⌘V a screenshot.</p>
+          {/if}
+
+          {#if attached.length > 0}
+            <ul class="chips">
+              {#each attached as a (a.id)}
+                <li class="chip">
+                  <button
+                    class="chip-main"
+                    title="{a.path}&#10;Click to insert this path again"
+                    onclick={(e) => { e.stopPropagation(); insertAgain(agent.id, a.path); }}
+                  >
+                    {#if a.isImage && isThumbnailable(a.path)}
+                      <img class="chip-thumb" src={thumbnailSrc(a.path)} alt={a.name} loading="lazy" />
+                    {:else}
+                      <span class="chip-glyph"><Icon name={a.isImage ? "image" : "file"} size={13} /></span>
+                    {/if}
+                    <span class="chip-name">{a.name}</span>
+                  </button>
+                  <button
+                    class="chip-act"
+                    title="Open in the default app"
+                    aria-label="Open attachment"
+                    onclick={(e) => { e.stopPropagation(); reveal(a.path); }}
+                  >
+                    <Icon name="open" size={11} />
+                  </button>
+                  <button
+                    class="chip-act danger"
+                    title="Remove from this list (the agent keeps what was already sent)"
+                    aria-label="Remove from list"
+                    onclick={(e) => { e.stopPropagation(); forget(agent.id, a.id); }}
+                  >
+                    <Icon name="close" size={11} />
+                  </button>
+                </li>
+              {/each}
+            </ul>
+            <button
+              class="tray-clear"
+              onclick={(e) => { e.stopPropagation(); forgetAll(agent.id); }}
+            >
+              Clear list
+            </button>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- The handle: quiet when there is nothing attached, badged when there is. -->
+      <button
+        class="tray-toggle"
+        class:on={trayOpen}
+        class:has={attached.length > 0 || !!notice}
+        class:pulse
+        class:waiting={!!notice}
+        title={trayOpen ? "Hide attachments" : "Attachments"}
+        aria-label="Attachments"
+        aria-expanded={trayOpen}
+        onclick={(e) => { e.stopPropagation(); trayOpen = !trayOpen; }}
+      >
+        <Icon name="paperclip" size={13} />
+        {#if attached.length > 0}
+          <span class="tray-count">{attached.length}</span>
+        {:else if notice}
+          <span class="tray-count waiting">!</span>
+        {/if}
+      </button>
+    {/if}
+
+    <!-- Drop target. Tauri owns the drag events, so this is driven by the shared
+         dragState rather than by CSS :hover. -->
+    {#if dragOver}
+      <div class="dropzone">
+        <div class="dropzone-card">
+          <Icon name="paperclip" size={20} />
+          <strong>Attach to {agent.name}</strong>
+          <span>Release to hand the file paths to this agent</span>
+        </div>
+      </div>
+    {/if}
     {#if visible && error}
       <!-- The process could not start. Say why, and name the folder — a moved workspace
            or a deleted worktree is by far the most common cause, and it is invisible
@@ -301,6 +569,305 @@
   .pane.visible {
     display: block;
   }
+  /* ---------- attachments ---------- */
+
+  /* Drop target: a full-pane invitation, not a 1px border you have to hunt for. */
+  .dropzone {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    display: grid;
+    place-items: center;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    outline: 2px dashed var(--accent);
+    outline-offset: -6px;
+    /* The drag is Tauri's, not the webview's — nothing here may swallow it. */
+    pointer-events: none;
+  }
+  .dropzone-card {
+    display: grid;
+    justify-items: center;
+    gap: 3px;
+    padding: 14px 20px;
+    border-radius: 10px;
+    background: var(--surface-float);
+    border: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-md);
+    color: var(--text-secondary);
+    text-align: center;
+  }
+  .dropzone-card strong {
+    font-size: 13px;
+    color: var(--text);
+  }
+  .dropzone-card span {
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+  .dropzone-card :global(svg) {
+    color: var(--accent-bright);
+  }
+
+  /*
+   * The handle: a small square on the pane's right edge. Nearly invisible until
+   * hovered while nothing is attached, so an empty pane is not decorated with a
+   * control you are not using.
+   */
+  .tray-toggle {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 26px;
+    padding: 0 7px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--surface-2);
+    color: var(--text-faint);
+    cursor: pointer;
+    opacity: 0.45;
+    transition: opacity 0.14s, color 0.14s, background 0.14s, border-color 0.14s;
+  }
+  .pane:hover .tray-toggle,
+  .tray-toggle.on,
+  .tray-toggle.has,
+  .tray-toggle:focus-visible {
+    opacity: 1;
+  }
+  .tray-toggle:hover {
+    background: var(--surface-4);
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+  .tray-toggle.on {
+    border-color: var(--accent);
+    color: var(--accent-bright);
+  }
+  /* A new attachment landed while the panel was closed. */
+  .tray-toggle.pulse {
+    border-color: var(--accent);
+    color: var(--accent-bright);
+    animation: attach-pulse 0.7s ease-out 2;
+  }
+  @keyframes attach-pulse {
+    0% { box-shadow: 0 0 0 0 var(--accent-glow); }
+    100% { box-shadow: 0 0 0 7px transparent; }
+  }
+  .tray-count.waiting {
+    background: var(--warn, #f2c55c);
+    color: var(--on-hue, #16171a);
+  }
+  .tray-toggle.waiting {
+    border-color: var(--warn, #f2c55c);
+    color: var(--warn, #f2c55c);
+    opacity: 1;
+  }
+  .tray-count {
+    min-width: 15px;
+    height: 15px;
+    padding: 0 4px;
+    display: grid;
+    place-items: center;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-size: 10px;
+    font-weight: 700;
+  }
+
+  /*
+   * The panel: anchored to the right edge above its handle, OPAQUE, and only as wide
+   * as it needs to be. The previous full-width translucent bar printed itself over
+   * the agent's own output — two layers of text, neither readable.
+   */
+  .tray {
+    position: absolute;
+    right: 8px;
+    bottom: 40px;
+    z-index: 6;
+    width: min(268px, calc(100% - 24px));
+    max-height: min(320px, calc(100% - 60px));
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border-radius: 9px;
+    background: var(--surface-float);
+    border: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-md);
+  }
+  .tray-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .tray-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .tray-x {
+    width: 18px;
+    height: 18px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+  }
+  .tray-x:hover {
+    background: var(--surface-3);
+    color: var(--text);
+  }
+  .tray-add {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 28px;
+    border: 1px dashed var(--border-strong);
+    border-radius: 7px;
+    background: var(--surface-2);
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+  .tray-add:hover {
+    background: var(--surface-3);
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  .tray-msg {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--text-faint);
+  }
+  .tray-msg.failed {
+    color: var(--danger, #ff6b6b);
+  }
+  .tray-msg.waiting {
+    color: var(--warn, #f2c55c);
+  }
+  .tray-clear {
+    align-self: flex-start;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-ghost);
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .tray-clear:hover {
+    background: var(--surface-3);
+    color: var(--text-secondary);
+  }
+
+  /* One chip per attached file: thumbnail, name, open, forget. */
+  .chips {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
+  .chip {
+    display: flex;
+    align-items: center;
+    height: 30px;
+    padding-right: 2px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-2);
+  }
+  .chip:hover {
+    border-color: var(--border-strong);
+  }
+  .chip-main {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    padding: 0 4px;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .chip-thumb {
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    border-radius: 4px;
+    object-fit: cover;
+    background: var(--bg);
+  }
+  .chip-glyph {
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    border-radius: 4px;
+    background: var(--surface-4);
+    color: var(--text-faint);
+  }
+  .chip-name {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .chip-main:hover .chip-name {
+    color: var(--text);
+  }
+  .chip-act {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-ghost);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s, color 0.12s, background 0.12s;
+  }
+  .chip:hover .chip-act,
+  .chip-act:focus-visible {
+    opacity: 1;
+  }
+  .chip-act:hover {
+    background: var(--surface-4);
+    color: var(--text);
+  }
+  .chip-act.danger:hover {
+    color: var(--danger, #ff6b6b);
+  }
+
   /* The visible surface is an inset, rounded card — so split panes read as
      distinct tiles with a little breathing room instead of edge-to-edge slabs.
      The inset also forms the gap between neighbouring panes, and the hairline
