@@ -14,9 +14,17 @@ side — the letter for the name, the glyph for what the app does, the streaks f
 
 ### Sizing rule
 
-The tile fills **98% of the icon canvas**. This matters: an earlier export had it at 80%, which made
-Codesu look visibly smaller than neighbouring icons in the macOS dock. If you re-export, keep the
-tile at 98% and the corners transparent (not black), so the icon reads correctly on light backgrounds.
+The tile fills **89.8% of the icon canvas** (920 x 920 centered in 1024 x 1024), with the corners
+transparent (not black) so the icon reads correctly on light backgrounds.
+
+That number is deliberately *above* Apple's macOS icon grid, which puts a square icon body at
+824 x 824 -- 80.5% of the canvas. Notes, Mail, Chrome and MongoDB Compass all sit on that grid.
+Codesu followed it exactly for one release and looked visibly small beside them: the tile is
+near-black, and a dark shape reads smaller than a light one of identical size. 920 is the size at
+which it matches its dock neighbours by eye rather than by ruler.
+
+Do not "fix" this back to 80.5%, and do not push it to 98% -- an earlier export filled almost the
+whole canvas and made Codesu the biggest icon in the dock by a clear margin.
 
 ### Color Palette
 
@@ -113,6 +121,7 @@ The logo uses high-contrast colors:
 | 1.0 | Jul 2026 | Initial design - Water + Flow concept |
 | 1.1 | Jul 2026 | Refined gradients and node positioning |
 | 2.0 | Sep 2026 | "C" + `</>` mark with motion streaks; tile rescaled 80% → 98% of canvas |
+| 2.1 | Sep 2026 | Tile rescaled 98% → 80.5% (Apple grid) → 89.8% for optical parity in the dock |
 
 ## Future Variations
 
@@ -131,8 +140,9 @@ After replacing it:
 1. Run `pnpm tauri icon src-tauri/icons/logo_source.png -o src-tauri/icons`
 2. Delete the `ios/` and `android/` directories it also emits — Codesu is desktop-only
 3. Copy a 512×512 version to `static/favicon.png`
+4. Copy `128x128@2x.png` to `static/brand-mark.png` — the titlebar mark renders that file
 
-Keep the tile at 98% of the canvas with transparent corners (see **Sizing rule** above).
+Keep the tile at 89.8% of the canvas with transparent corners (see **Sizing rule** above).
 
 > `src-tauri/icons/logo.svg` is an older vector experiment and does **not** match the shipped
 > icons. Do not regenerate from it.
