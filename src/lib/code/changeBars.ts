@@ -207,10 +207,21 @@ function revert(view: EditorView, hunk: Hunk) {
   const from = doc.line(Math.min(hunk.from, doc.lines)).from;
   const to = doc.line(Math.min(hunk.to, doc.lines)).to;
   if (hunk.kind === "add" && !hunk.old.length) {
-    // Reverting an addition removes the lines, including the newline that carries them.
-    const end = Math.min(hunk.to + 1, doc.lines);
-    const cut = hunk.to < doc.lines ? doc.line(end).from : to;
-    view.dispatch({ changes: { from, to: cut }, userEvent: "revert.line" });
+    /*
+      Removing lines means removing a newline with them, and WHICH newline depends on
+      where the block sits. Mid-file it is the one after the block (so the following
+      line moves up); at the end of the file there is no newline after it, so the one
+      BEFORE it has to go — taking `to` alone left an empty last line behind, which
+      kept the file dirty and put a change bar on the blank it had just created.
+    */
+    if (hunk.to >= doc.lines) {
+      const start = hunk.from > 1 ? doc.line(hunk.from - 1).to : 0;
+      view.dispatch({ changes: { from: start, to: doc.length }, userEvent: "revert.line" });
+      return;
+    }
+    view.dispatch(
+      { changes: { from, to: doc.line(hunk.to + 1).from }, userEvent: "revert.line" },
+    );
     return;
   }
   view.dispatch({ changes: { from, to, insert: text }, userEvent: "revert.line" });
