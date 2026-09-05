@@ -834,6 +834,7 @@
     border-radius: 9px;
   }
   .seg {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -850,6 +851,24 @@
   .seg:hover {
     background: var(--surface-4);
     color: var(--text);
+  }
+  /* At rest the two halves are only words in a track, so a hairline keeps them from
+     reading as one label. Any fill — hover or selection — already separates them, so
+     the line steps out of the way rather than cutting through a rounded edge. */
+  .seg + .seg::before {
+    content: "";
+    position: absolute;
+    left: -2px;
+    top: 3px;
+    bottom: 3px;
+    width: 1px;
+    background: var(--border-strong);
+    transition: opacity 0.13s;
+  }
+  .mode-seg:hover .seg + .seg::before,
+  .mode-seg:has(.seg.on) .seg + .seg::before,
+  .mode-seg:has(.seg:focus-visible) .seg + .seg::before {
+    opacity: 0;
   }
   /* Same "you are here" treatment the nav group gives its active tab. */
   .seg.on {
