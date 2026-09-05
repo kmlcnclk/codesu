@@ -303,16 +303,6 @@
 </script>
 
 <div class="app">
-  <!--
-    The violet corner wash. Anchored to the window's top-left and painted OVER the
-    chrome rather than inside the titlebar, so it crosses the bar's bottom edge as
-    one continuous light instead of stopping dead at it. It reaches only a little
-    past the bar on purpose: spread over the panel it tinted the tree rows and the
-    editor's corner, which is content, not chrome. Inert to the pointer, and below
-    the palette (60) / modals (100) / menus (200) so it never tints an overlay.
-  -->
-  <div class="corner-wash" aria-hidden="true"></div>
-
   <header class="titlebar" class:fullscreen={isFullscreen} data-tauri-drag-region>
     <span class="brand">Codesu</span>
 
@@ -467,24 +457,6 @@
     font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     color: var(--text);
   }
-  .corner-wash {
-    position: absolute;
-    top: 0;
-    left: 0;
-    /* Wide but shallow: the titlebar is 40px, so this clears it by ~16px and is
-       already transparent by its own bottom edge — no seam, no tinted rows. */
-    width: min(620px, 48%);
-    height: 56px;
-    pointer-events: none;
-    z-index: 30;
-    background: radial-gradient(
-      100% 100% at 0% 0%,
-      color-mix(in srgb, var(--hue-violet) 22%, transparent) 0%,
-      color-mix(in srgb, var(--hue-violet) 9%, transparent) 34%,
-      transparent 78%
-    );
-  }
-
   .titlebar {
     display: flex;
     align-items: center;
