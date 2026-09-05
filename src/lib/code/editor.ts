@@ -33,8 +33,16 @@ export const codesuTheme = EditorView.theme(
     ".cm-scroller": { lineHeight: "1.55", overflow: "auto" },
     "&.cm-focused": { outline: "none" },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "#ced0d6", borderLeftWidth: "2px" },
-    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
-      { backgroundColor: "#214283" },
+    /*
+      Selection. The focused case needs the base theme's own selector shape
+      (`&dark.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground`) —
+      a shorter one loses on specificity and CodeMirror paints its default near-black
+      `#233`, which is what made a double-clicked word look unselected.
+    */
+    ".cm-selectionBackground, .cm-content ::selection": { background: "#214283 !important" },
+    "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+      background: "#214283 !important",
+    },
     ".cm-gutters": {
       backgroundColor: "#131416",
       color: "#4b5059",
@@ -43,7 +51,12 @@ export const codesuTheme = EditorView.theme(
       // margin is the separation.
       borderRight: "1px solid #131416",
     },
-    ".cm-activeLine": { backgroundColor: "#1c1d20" },
+    /*
+      Translucent, not the opaque `#1c1d20` it looks like: `drawSelection` paints the
+      selection in a layer BEHIND the lines, so an opaque active line hides the selection
+      on the very line the cursor is on. 4% white over `#131416` lands on the same colour.
+    */
+    ".cm-activeLine": { backgroundColor: "rgba(255, 255, 255, 0.04)" },
     // The Run gutter (see `testGutter`). Dim until hovered, so a file full of tests reads
     // as code rather than as a column of green arrows.
     ".cm-test-gutter": { width: "16px" },

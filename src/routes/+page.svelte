@@ -205,6 +205,8 @@
         view = "agents";
       } else if (shortcut.action === "navigate-code") {
         toggleCode();
+      } else if (shortcut.action === "navigate-review") {
+        toggleReview();
       } else if (shortcut.action === "navigate-tasks") {
         view = "tasks";
       } else if (shortcut.action === "navigate-notes") {
@@ -378,6 +380,17 @@
     view = viewBeforeReview === "review" ? "agents" : viewBeforeReview;
   }
 
+  /**
+   * The titlebar Review button and ⌘⇧R: in when out, back where you were when in.
+   *
+   * Guarded on there being a diff to read at all — outside a git workspace the button is
+   * not drawn, so the shortcut must not open an empty page either.
+   */
+  function toggleReview() {
+    if (view === "review") closeReview();
+    else if (changedPaths) openReview();
+  }
+
   /** "Edit file" inside a diff — hand the file to the Code view, which owns editing. */
   function editFromReview(absPath: string) {
     if (app.activeWorkspaceId) app.openCodeFile(app.activeWorkspaceId, absPath);
@@ -401,7 +414,21 @@
 
 <div class="app">
   <header class="titlebar" class:fullscreen={isFullscreen} data-tauri-drag-region>
-    <span class="brand">Codesu</span>
+    <span class="brand" title="Codesu">
+      <!--
+        The wordmark alone read as a stray label floating beside the traffic lights.
+        Pairing it with the app's own mark (the C from the dock icon) turns it into a
+        lockup: a fixed shape the eye can anchor on, at the same visual weight as the
+        nav pills next to it rather than shouting over them.
+      -->
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+          stroke-linecap="round">
+          <path d="M17.3 7.2a7 7 0 1 0 0 9.6" />
+        </svg>
+      </span>
+      <span class="wordmark">Codesu</span>
+    </span>
 
     <nav class="nav" aria-label="Views">
       {#each NAV as item (item.view)}
@@ -456,33 +483,40 @@
       group: both take over the whole window (no agent rail), so they read as modes you
       enter next to the workspace they apply to — not as two tabs among seven. Neither
       has anything to act on outside the workspace views, so both go with them.
+
+      They are one segmented control, not two buttons: they are the two halves of a
+      single question — which side of the workspace you are looking at — and only one can
+      be lit at a time. The lit half is also the way back out (see toggleCode/Review).
     -->
     {#if inWorkspaceView}
-      {#if changedPaths}
+      <div class="mode-seg" role="group" aria-label="Workspace mode">
         <button
-          class="code-btn review-btn"
-          class:on={view === "review"}
-          class:pending={freshTurn && view !== "review"}
-          aria-pressed={view === "review"}
-          title={changedPaths.length === 0
-            ? "Review changes — working tree clean"
-            : `Review ${changedPaths.length} changed file${changedPaths.length === 1 ? "" : "s"}` +
-              (unreviewed > 0 ? ` · ${unreviewed} not yet reviewed` : " · all reviewed")}
-          onclick={() => (view === "review" ? closeReview() : openReview())}
+          class="seg"
+          class:on={view === "code"}
+          aria-pressed={view === "code"}
+          title={view === "code" ? "Close Code (⌘E)" : "Code (⌘E)"}
+          onclick={toggleCode}
         >
-          <Icon name="diff" size={14} /><span class="cb-lbl">Review</span>
-          {#if changedPaths.length}<span class="rb-count">{changedPaths.length}</span>{/if}
+          <Icon name="code2" size={14} /><span class="cb-lbl">Code</span>
         </button>
-      {/if}
-      <button
-        class="code-btn"
-        class:on={view === "code"}
-        aria-pressed={view === "code"}
-        title={view === "code" ? "Close Code (⌘E)" : "Code (⌘E)"}
-        onclick={toggleCode}
-      >
-        <Icon name="code2" size={14} /><span class="cb-lbl">Code</span>
-      </button>
+        {#if changedPaths}
+          <button
+            class="seg review-seg"
+            class:on={view === "review"}
+            class:pending={freshTurn && view !== "review"}
+            aria-pressed={view === "review"}
+            title={changedPaths.length === 0
+              ? "Review changes — working tree clean (⌘⇧R)"
+              : `Review ${changedPaths.length} changed file${changedPaths.length === 1 ? "" : "s"}` +
+                (unreviewed > 0 ? ` · ${unreviewed} not yet reviewed` : " · all reviewed") +
+                " (⌘⇧R)"}
+            onclick={toggleReview}
+          >
+            <Icon name="diff" size={14} /><span class="cb-lbl">Review</span>
+            {#if changedPaths.length}<span class="rb-count">{changedPaths.length}</span>{/if}
+          </button>
+        {/if}
+      </div>
     {/if}
   </header>
 
@@ -611,12 +645,38 @@
     }
   }
   .brand {
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.4px;
-    color: var(--text);
     display: flex;
     align-items: center;
+    gap: 8px;
+    /* Not a button: the whole lockup stays part of the window drag region. */
+    pointer-events: none;
+  }
+  .mark {
+    flex: none;
+    width: 19px;
+    height: 19px;
+    display: grid;
+    place-items: center;
+    border-radius: 6px;
+    color: var(--text);
+    background: linear-gradient(155deg, var(--surface-3), var(--surface-2));
+    border: 1px solid var(--border-strong);
+    /* A single top highlight is what keeps a 19px tile from reading as a flat blob. */
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  .mark svg {
+    width: 12px;
+    height: 12px;
+    display: block;
+  }
+  .wordmark {
+    /* 700/0.4px was heavier and wider than every other label in the bar. The name is
+       an identity, not a call to action — 600 at normal tracking sits with the nav. */
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.1px;
+    color: var(--text);
+    white-space: nowrap;
   }
   .nav {
     display: flex;
@@ -769,43 +829,51 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .code-btn {
+  /* One pill, two halves: a track with a thumb, the way a segmented control works. The
+     lit half is a rounded pill INSIDE the track, so it never has to line up with the
+     track's own corners — and with a moving fill to mark the selection, a divider
+     between the halves would only be a second line saying the same thing. */
+  .mode-seg {
+    display: flex;
+    flex-shrink: 0;
+    margin-left: 4px;
+    padding: 2px;
+    gap: 2px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-2);
+    border-radius: 9px;
+  }
+  .seg {
     display: flex;
     align-items: center;
     gap: 6px;
-    flex-shrink: 0;
-    margin-left: 4px;
-    border: 1px solid var(--border-strong);
-    background: var(--surface-3);
-    color: var(--text-secondary);
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
     font-size: 12px;
     font-weight: 600;
-    padding: 4px 9px;
+    padding: 3px 9px;
     border-radius: 7px;
     cursor: pointer;
-    transition: background 0.13s, color 0.13s, border-color 0.13s;
+    transition: background 0.13s, color 0.13s;
   }
-  .code-btn:hover {
+  .seg:hover {
     background: var(--surface-4);
-    border-color: var(--accent);
-    color: var(--accent-bright);
+    color: var(--text);
   }
   /* Same "you are here" treatment the nav group gives its active tab. */
-  .code-btn.on {
+  .seg.on {
     background: var(--accent-soft);
-    border-color: var(--accent-line);
     color: var(--accent-bright);
   }
-  /* Review is the quieter of the pair until an agent finishes a turn — the moment it
-     exists to advertise. */
-  .review-btn {
-    background: var(--surface-2);
-    color: var(--text-muted);
+  .seg.on:hover {
+    background: color-mix(in srgb, var(--accent) 20%, var(--surface-2));
   }
-  .review-btn.pending {
+  /* Review stays quiet until an agent finishes a turn — the moment it exists to
+     advertise. */
+  .review-seg.pending {
     color: var(--accent-bright);
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .rb-count {
     font-size: 10px;
@@ -815,8 +883,8 @@
     background: var(--surface-4);
     color: var(--text-muted);
   }
-  .review-btn.pending .rb-count,
-  .review-btn.on .rb-count {
+  .review-seg.pending .rb-count,
+  .review-seg.on .rb-count {
     background: color-mix(in srgb, var(--accent) 26%, transparent);
     color: var(--accent-bright);
   }

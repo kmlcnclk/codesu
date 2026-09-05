@@ -93,6 +93,7 @@
     // "expand context" affordances, borrowed from the review pane's hunk gutter
     unfold:
       "<path d='M12 3v5'/><path d='M9.5 5.5 12 3l2.5 2.5'/><path d='M12 21v-5'/><path d='M9.5 18.5 12 21l2.5-2.5'/><path d='M4 12h16'/>",
+    fold: "<path d='M12 3v5'/><path d='M9.5 5.5 12 8l2.5-2.5'/><path d='M12 21v-5'/><path d='M9.5 18.5 12 16l2.5 2.5'/><path d='M4 12h16'/>",
     arrowUp: "<path d='M12 19V5'/><path d='M6 11l6-6 6 6'/>",
     arrowDown: "<path d='M12 5v14'/><path d='M6 13l6 6 6-6'/>",
     chevronsUp: "<path d='m7 14 5-5 5 5'/><path d='m7 19 5-5 5 5'/>",
