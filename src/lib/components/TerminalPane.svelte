@@ -13,16 +13,15 @@
     attach,
     attachBlob,
     attachmentsOf,
+    ensureThumbnails,
     forget,
     forgetAll,
-    insertAgain,
     isThumbnailable,
     notices,
     pickFiles,
     registerPane,
     thumbnailSrc,
   } from "$lib/terminal/attachments.svelte";
-  import { openPath } from "@tauri-apps/plugin-opener";
   import type { Rect } from "$lib/terminal/layout";
   import Icon from "./Icon.svelte";
 
@@ -232,6 +231,14 @@
   // ---------- attachments ----------
 
   const attached = $derived(attachmentsOf(agent.id));
+  /**
+   * Attachments restored from disk have no asset-protocol grant behind them — the
+   * scope is rebuilt from empty on every launch — so ask for one as soon as this
+   * pane's list is known, or every reopened screenshot renders as a file glyph.
+   */
+  $effect(() => {
+    if (attached.length > 0) ensureThumbnails(agent.id);
+  });
   /** e.g. files dropped on a dormant pane, waiting for it to be resumed. */
   const notice = $derived(notices[agent.id] ?? null);
   /**
@@ -346,6 +353,7 @@
       // layer at a time, as any stacked popover should behave.
       if (preview) {
         preview = null;
+        previewText = null;
         return;
       }
       trayOpen = false;
@@ -353,7 +361,10 @@
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       // The preview sits on top, so Escape dismisses that first.
-      if (preview) preview = null;
+      if (preview) {
+        preview = null;
+        previewText = null;
+      }
       else trayOpen = false;
     };
 
@@ -393,13 +404,53 @@
    * PDF) goes to whatever the system opens it with.
    */
   let preview = $state<TaskAttachment | null>(null);
+  /** Text of the previewed file, once read. Null while loading or for an image. */
+  let previewText = $state<string | null>(null);
 
-  function view(a: TaskAttachment) {
+  /** Hand the file to whatever the OS opens it with — the last resort, not the first. */
+  function openExternally(a: TaskAttachment) {
+    // Not the opener plugin's JS API: that one is gated by a static path scope in the
+    // capability file, which attachments (anywhere on disk) can never satisfy without
+    // opening the whole filesystem to the webview. `open_attachment` checks each path
+    // in Rust instead.
+    invoke("open_attachment", { path: a.path }).catch((err) =>
+      fail(err, "could not open the attachment"),
+    );
+  }
+
+  async function view(a: TaskAttachment) {
     if (a.isImage && isThumbnailable(a.path)) {
+      previewText = null;
       preview = a;
       return;
     }
-    openPath(a.path).catch((err) => fail(err, "could not open the attachment"));
+    /*
+     * Everything else is shown IN the app first, and only bounced to the OS when we
+     * genuinely cannot render it.
+     *
+     * Deliberately not the Code page: that editor is scoped to the active workspace's
+     * root, and an attachment is routinely a file from some other checkout entirely —
+     * it would refuse the very files people attach most.
+     */
+    previewText = null;
+    preview = a;
+    try {
+      const file = await invoke<{ content: string; refused: string | null }>(
+        "read_attachment",
+        { path: a.path },
+      );
+      // Binary or oversized: there is nothing honest to render, so let the OS have it.
+      if (file.refused) {
+        preview = null;
+        openExternally(a);
+        return;
+      }
+      // Another attachment may have been clicked while this one was loading.
+      if (preview?.id === a.id) previewText = file.content;
+    } catch (err) {
+      preview = null;
+      fail(err, "could not read the attachment");
+    }
   }
 
   function focus() {
@@ -524,14 +575,6 @@
                     <span class="chip-name">{a.name}</span>
                   </button>
                   <button
-                    class="chip-act"
-                    title="Type this path at the prompt again"
-                    aria-label="Insert path again"
-                    onclick={(e) => { e.stopPropagation(); insertAgain(agent.id, a.path); }}
-                  >
-                    <Icon name="arrowRight" size={11} />
-                  </button>
-                  <button
                     class="chip-act danger"
                     title="Remove from this list (the agent keeps what was already sent)"
                     aria-label="Remove from list"
@@ -553,25 +596,30 @@
       {/if}
 
       {#if preview}
-        <!-- Image preview. Sized to the pane, never larger than the image itself, so a
-             small screenshot is not stretched into mush. -->
+        <!-- Attachment preview: the file itself over the pane, with its name and a way
+             out. An image is scaled to FIT its frame and never blown up past its own
+             size, so a small screenshot is not stretched into mush. -->
         <div class="preview">
           <figure class="preview-box" bind:this={previewEl}>
-            <img src={thumbnailSrc(preview.path)} alt={preview.name} />
+            {#if preview.isImage && isThumbnailable(preview.path)}
+              <!-- The frame owns the size; the image centres inside it. Sizing the
+                   frame from the image is what let a 2x screenshot overflow and get
+                   clipped by the frame's own `overflow: hidden`. -->
+              <div class="preview-img">
+                <img src={thumbnailSrc(preview.path)} alt={preview.name} />
+              </div>
+            {:else if previewText === null}
+              <p class="preview-loading">Reading {preview.name}…</p>
+            {:else}
+              <pre class="preview-text">{previewText}</pre>
+            {/if}
             <figcaption>
               <span class="preview-name" title={preview.path}>{preview.name}</span>
-              <button
-                class="preview-open"
-                title="Open in the default app"
-                onclick={(e) => { e.stopPropagation(); openPath(preview!.path).catch((err) => fail(err, "could not open the attachment")); }}
-              >
-                <Icon name="open" size={12} />
-              </button>
               <button
                 class="preview-x"
                 title="Close (Esc)"
                 aria-label="Close preview"
-                onclick={(e) => { e.stopPropagation(); preview = null; }}
+                onclick={(e) => { e.stopPropagation(); preview = null; previewText = null; }}
               >
                 <Icon name="close" size={13} />
               </button>
@@ -826,12 +874,18 @@
     z-index: 7;
     display: grid;
     place-items: center;
-    padding: 16px;
+    /* Just enough to keep the pane's edge visible behind the overlay. */
+    padding: 10px;
     background: color-mix(in srgb, var(--bg) 78%, transparent);
     backdrop-filter: blur(2px);
   }
   .preview-box {
     margin: 0;
+    /* One size for every attachment, driven by the pane rather than by the content: an
+       attachment is opened to be READ, and both a CSV's long lines and a 2x screenshot
+       want the room. The caps only bite on a very wide monitor. */
+    width: min(1200px, 100%);
+    height: min(900px, 100%);
     max-width: 100%;
     max-height: 100%;
     display: flex;
@@ -843,13 +897,47 @@
     box-shadow: var(--shadow-md);
     overflow: hidden;
   }
-  .preview-box img {
+  /* Fills whatever the caption leaves, so the image never pushes it off the frame. */
+  .preview-img {
+    flex: 1 1 auto;
     min-height: 0;
-    max-width: 100%;
-    /* The caption is ~34px; leaving it out would let a tall image push it off. */
-    max-height: calc(100% - 34px);
-    object-fit: contain;
+    display: grid;
+    place-items: center;
+    padding: 8px;
     background: var(--term-bg);
+  }
+  .preview-img img {
+    max-width: 100%;
+    max-height: 100%;
+    /* `width/height: auto` so a small image keeps its own size instead of being
+       upscaled to fill the frame. */
+    width: auto;
+    height: auto;
+    object-fit: contain;
+  }
+  /* Text attachments share the image's frame: same box, same caption, scrolling body. */
+  .preview-text {
+    margin: 0;
+    min-height: 0;
+    flex: 1 1 auto;
+    overflow: auto;
+    padding: 10px 12px;
+    background: var(--term-bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.55;
+    /* Wrap rather than scroll sideways — prose attachments (a README) are the common
+       case, and a horizontal scrollbar makes them unreadable in a pane-sized box. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 2;
+  }
+  .preview-loading {
+    margin: 0;
+    padding: 18px 14px;
+    color: var(--text-faint);
+    font-size: 12.5px;
   }
   .preview-box figcaption {
     flex: 0 0 auto;
@@ -868,7 +956,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preview-open,
   .preview-x {
     width: 22px;
     height: 22px;
@@ -882,13 +969,12 @@
     cursor: pointer;
     transition: background 0.12s, color 0.12s;
   }
-  .preview-open:hover,
   .preview-x:hover {
     background: var(--surface-3);
     color: var(--text);
   }
 
-  /* One chip per attached file: thumbnail, name, view, insert, forget. */
+  /* One chip per attached file: thumbnail, name, forget. */
   .chips {
     list-style: none;
     margin: 0;
@@ -904,7 +990,9 @@
     display: flex;
     align-items: center;
     height: 30px;
-    padding-right: 2px;
+    /* The ✕ used to sit flush against the chip's edge — it needs room to read as a
+       button rather than as part of the border. */
+    padding-right: 6px;
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--surface-2);

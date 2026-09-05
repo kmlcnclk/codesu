@@ -52,6 +52,10 @@
        which matters because you aim the drop by looking at it. */
     box-shadow: inset 0 0 0 2px var(--border-strong);
     background: color-mix(in oklab, var(--bg) 22%, transparent);
+    /* Follows the window's own rounded corners. A square ring drawn to `inset: 0`
+       runs straight across them, so the highlight reads as a rectangle sitting on
+       the app rather than as the app's own edge lighting up. */
+    border-radius: 10px;
   }
   .veil.aimed {
     box-shadow: inset 0 0 0 2px var(--accent);

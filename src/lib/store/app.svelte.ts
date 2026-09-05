@@ -262,6 +262,15 @@ export interface Agent {
   initialPrompt: string | null;
   /** Archived alongside its workspace — hidden from the active UI, restored on unarchive. */
   archived: boolean;
+  /**
+   * Files attached to this agent, newest last — what the pane's attachment tray shows.
+   *
+   * Persisted with the agent rather than held for the session: the tray is the only
+   * record of what was actually sent (the terminal shows a path and nothing more), and
+   * losing it on quit meant reopening an agent whose conversation plainly referenced
+   * four images while the tray claimed nothing had ever been attached.
+   */
+  attachments: TaskAttachment[];
   // runtime-only (not persisted)
   status: RunStatus;
   exitCode: number | null;
@@ -720,6 +729,8 @@ class AppState {
       { id: "open-settings", name: "Go to Settings", key: "s", ctrl: false, shift: false, alt: false, meta: true, context: "global", action: "navigate-settings" },
       { id: "open-terminal", name: "Go to Terminal", key: "t", ctrl: false, shift: true, alt: false, meta: true, context: "global", action: "navigate-terminal" },
       { id: "open-code", name: "Go to Code", key: "e", ctrl: false, shift: false, alt: false, meta: true, context: "global", action: "navigate-code" },
+      // ⌘R is Report, so Review takes the shifted twin of the same letter.
+      { id: "open-review", name: "Go to Review", key: "r", ctrl: false, shift: true, alt: false, meta: true, context: "global", action: "navigate-review" },
 
       // Agents page only
       { id: "new-claude-agent", name: "New Claude Agent", key: "t", ctrl: false, shift: false, alt: false, meta: true, context: "agents", action: "new-claude-agent" },
@@ -1242,6 +1253,7 @@ class AppState {
       lastUsedAt: Date.now(),
       initialPrompt: input.initialPrompt ?? null,
       archived: false,
+      attachments: [],
       status: "idle",
       exitCode: null,
       state: "idle",
@@ -1258,6 +1270,50 @@ class AppState {
     this.launchedAgentIds.add(agent.id);
     this.persist();
     return agent;
+  }
+
+  /** What this agent has attached, newest last. */
+  attachmentsOf(agentId: string): TaskAttachment[] {
+    return this.agents.find((a) => a.id === agentId)?.attachments ?? [];
+  }
+
+  /**
+   * Record files against an agent, skipping paths it already carries.
+   *
+   * Returns the entries actually added, so the caller can tell a genuinely new
+   * attachment from a re-send of one already listed.
+   */
+  addAttachments(agentId: string, paths: string[]): TaskAttachment[] {
+    const agent = this.agents.find((a) => a.id === agentId);
+    if (!agent) return [];
+    const have = new Set(agent.attachments.map((f) => f.path));
+    const added: TaskAttachment[] = [];
+    for (const path of paths) {
+      // One entry per file, however many times its path is sent to the prompt.
+      if (have.has(path)) continue;
+      have.add(path);
+      added.push(makeAttachment(path));
+    }
+    if (added.length > 0) {
+      agent.attachments = [...agent.attachments, ...added];
+      this.persist();
+    }
+    return added;
+  }
+
+  /** Drop one recorded attachment (the agent keeps whatever was already sent). */
+  forgetAttachment(agentId: string, id: string) {
+    const agent = this.agents.find((a) => a.id === agentId);
+    if (!agent) return;
+    agent.attachments = agent.attachments.filter((f) => f.id !== id);
+    this.persist();
+  }
+
+  forgetAllAttachments(agentId: string) {
+    const agent = this.agents.find((a) => a.id === agentId);
+    if (!agent || agent.attachments.length === 0) return;
+    agent.attachments = [];
+    this.persist();
   }
 
   /** Cmd+T convenience: a Claude agent in the active workspace. */
@@ -2354,6 +2410,7 @@ class AppState {
         lastUsedAt: a.lastUsedAt,
         initialPrompt: a.initialPrompt,
         archived: a.archived,
+        attachments: a.attachments ?? [],
         // Persist the roster-ordering keys so reopening restores the exact order
         // (blocked→done→working→idle, most-recent-first). See rosterOf / STATE_RANK.
         state: a.state,
@@ -2449,6 +2506,8 @@ class AppState {
             createdAt: a.createdAt ?? Date.now(),
             lastUsedAt: a.lastUsedAt ?? a.createdAt ?? Date.now(),
             initialPrompt: a.initialPrompt ?? null,
+            // Absent on every state file written before attachments were persisted.
+            attachments: Array.isArray(a.attachments) ? a.attachments : [],
             status: "idle" as RunStatus,
             exitCode: null,
             // Restore the roster-ordering state so the agents reappear in the order
