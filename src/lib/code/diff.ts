@@ -19,8 +19,22 @@ export interface DiffRow {
    * Position within its file's `rows`. Carried on the row itself so the split view —
    * which reorders rows into left/right pairs — can still look up the row's
    * syntax-highlighted markup, which is keyed by original index.
+   *
+   * Context lines pulled in by the "expand" buttons are not part of the parsed diff at
+   * all, so they carry a NEGATIVE index (`-newNo`) to stay distinguishable from real
+   * rows without colliding with them.
    */
   idx: number;
+  /**
+   * For a `hunk` row only: the ranges its `@@ -a,b +c,d @@` header declares.
+   *
+   * The review pane needs them to work out how many unchanged lines sit between one
+   * hunk and the last, which is exactly what an "expand context" button offers to fill.
+   */
+  hunkOld?: number;
+  hunkOldLen?: number;
+  hunkNew?: number;
+  hunkNewLen?: number;
 }
 
 export interface DiffFile {
@@ -120,7 +134,17 @@ export function parseDiff(text: string): DiffFile[] {
     if (hunk) {
       oldNo = parseInt(hunk[1], 10);
       newNo = parseInt(hunk[3], 10);
-      f.rows.push({ kind: "hunk", text: line, oldNo: null, newNo: null, idx: f.rows.length });
+      f.rows.push({
+        kind: "hunk",
+        text: line,
+        oldNo: null,
+        newNo: null,
+        idx: f.rows.length,
+        hunkOld: oldNo,
+        hunkOldLen: hunk[2] === undefined ? 1 : parseInt(hunk[2], 10),
+        hunkNew: newNo,
+        hunkNewLen: hunk[4] === undefined ? 1 : parseInt(hunk[4], 10),
+      });
       continue;
     }
     // Header lines become chips on the file header, not rows (see `notes`).

@@ -88,6 +88,16 @@
     square: "<rect x='4' y='4' width='16' height='16' rx='2.4'/>",
     checkSquare:
       "<rect x='4' y='4' width='16' height='16' rx='2.4'/><path d='m8.5 12 2.5 2.5 4.5-5'/>",
+    filter: "<path d='M3 5h18'/><path d='M6.5 12h11'/><path d='M10 19h4'/>",
+    ellipsis: "<circle cx='5' cy='12' r='1.2'/><circle cx='12' cy='12' r='1.2'/><circle cx='19' cy='12' r='1.2'/>",
+    // "expand context" affordances, borrowed from the review pane's hunk gutter
+    unfold:
+      "<path d='M12 3v5'/><path d='M9.5 5.5 12 3l2.5 2.5'/><path d='M12 21v-5'/><path d='M9.5 18.5 12 21l2.5-2.5'/><path d='M4 12h16'/>",
+    arrowUp: "<path d='M12 19V5'/><path d='M6 11l6-6 6 6'/>",
+    arrowDown: "<path d='M12 5v14'/><path d='M6 13l6 6 6-6'/>",
+    chevronsUp: "<path d='m7 14 5-5 5 5'/><path d='m7 19 5-5 5 5'/>",
+    chevronsDown: "<path d='m7 10 5 5 5-5'/><path d='m7 5 5 5 5-5'/>",
+    sidebar: "<rect x='3' y='4' width='18' height='16' rx='2.2'/><path d='M9.5 4v16'/>",
     diff:
       "<path d='M12 4v6'/><path d='M9 7h6'/><path d='M9 17h6'/><circle cx='12' cy='12' r='9'/>",
     // board / dashboard (Tasks "Board" view toggle)
