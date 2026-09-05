@@ -28,6 +28,17 @@
   /** Bumped to make the tree re-read every mounted level. */
   let treeToken = $state(0);
 
+  /**
+   * Collapse every open folder back to the workspace root.
+   *
+   * The tree reads its open state straight out of `expanded`, so emptying the set is the
+   * whole operation — no level has to be remounted, and nothing about the open tabs or the
+   * scroll position changes.
+   */
+  function collapseAll() {
+    expanded.clear();
+  }
+
   // ---------- changed-file markers ----------
   /**
    * Absolute paths git reports as changed, for the file tree's markers only.
@@ -306,6 +317,13 @@
           title="Show hidden files"
           onclick={toggleHidden}><Icon name="eye" size={13} /></button
         >
+        <button
+          class="mini"
+          title="Collapse all folders"
+          aria-label="Collapse all folders"
+          disabled={expanded.size === 0}
+          onclick={collapseAll}><Icon name="fold" size={13} /></button
+        >
         <button class="mini" title="Refresh" onclick={refreshAll}
           ><Icon name="restore" size={13} /></button
         >
@@ -515,6 +533,15 @@
   }
   .mini.on {
     color: var(--accent-bright);
+  }
+  /* Nothing is expanded: the button stays in place, but reads as unavailable. */
+  .mini:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .mini:disabled:hover {
+    background: transparent;
+    color: var(--text-faint);
   }
   .rail-body {
     flex: 1;
