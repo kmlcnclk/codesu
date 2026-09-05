@@ -24,6 +24,63 @@
 
   let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
+  /** Drives the header's one toggle: fold everything, or unfold everything. */
+  let allCollapsed = $derived(
+    app.liveWorkspaces.length > 0 && app.liveWorkspaces.every((w) => app.wsCollapsed[w.id]),
+  );
+
+  /**
+   * Type-to-filter. A rail with five projects and thirty agents is a scroll, not
+   * a list; the reference's filter glyph is the answer, so it is a real one here.
+   * A workspace whose OWN name matches keeps its whole roster (you asked for the
+   * project); otherwise only its matching agents show, and empty projects drop out.
+   */
+  let query = $state("");
+  let searching = $state(false);
+  let searchEl = $state<HTMLInputElement | null>(null);
+
+  let q = $derived(query.trim().toLowerCase());
+  let rows = $derived.by(() => {
+    const all = app.liveWorkspaces.map((ws) => ({ ws, roster: app.rosterOf(ws.id) }));
+    if (!q) return all;
+    return all.flatMap((row) => {
+      if (row.ws.name.toLowerCase().includes(q)) return [row];
+      const hits = row.roster.filter((a) => a.name.toLowerCase().includes(q));
+      return hits.length ? [{ ws: row.ws, roster: hits }] : [];
+    });
+  });
+
+  function toggleSearch() {
+    searching = !searching;
+    if (!searching) query = "";
+  }
+  function searchKey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (query) query = "";
+      else toggleSearch();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      moveFocus(1);
+    }
+  }
+  function focusOnMount(node: HTMLInputElement) {
+    node.focus();
+  }
+
+  /** Split a name around the filter hit, so you can see WHY a row survived. */
+  function hl(name: string): [string, string, string] | null {
+    if (!q) return null;
+    const i = name.toLowerCase().indexOf(q);
+    if (i < 0) return null;
+    return [name.slice(0, i), name.slice(i, i + q.length), name.slice(i + q.length)];
+  }
+
+  /** The badge letter — a project reads as itself before you get to its name. */
+  function initial(name: string) {
+    return (name.trim()[0] ?? "?").toUpperCase();
+  }
+
   // Pointer-based drag reorder for workspaces (HTML5 DnD is unreliable in the
   // webview; pointer events are not, and let us show a grab/grabbing cursor).
   let wsDragId = $state<string | null>(null);
@@ -133,7 +190,7 @@
   }
 
   function wsPointerDown(e: PointerEvent, ws: Workspace) {
-    if (e.button !== 0 || editingWsId) return;
+    if (e.button !== 0 || editingWsId || q) return;
     wsDragId = ws.id;
     startY = e.clientY;
     wsDragMoved = false;
@@ -249,6 +306,33 @@
     }
   }
 
+  /**
+   * A tree is ONE tab stop, not thirty — Tab reaches the rail, arrows move inside
+   * it. Only the row the selection is on stays tabbable; the rest are reachable
+   * by keyboard through {@link moveFocus}. Falls back down the chain when the
+   * selected row is filtered out from under it.
+   */
+  let tabId = $derived.by(() => {
+    const a = app.activeAgent?.id;
+    if (a && rows.some((r) => r.roster.some((x) => x.id === a))) return a;
+    const w = app.activeWorkspaceId;
+    if (w && rows.some((r) => r.ws.id === w)) return w;
+    return rows[0]?.ws.id ?? null;
+  });
+
+  /**
+   * Selection can change from anywhere — ⌘1–9, the tab bar, a terminal closing.
+   * When it does, the rail follows it. `block: "nearest"` means an already-visible
+   * row is left exactly where it is, so this never yanks the list under the pointer.
+   */
+  $effect(() => {
+    const id = app.activeAgent?.id ?? app.activeWorkspaceId;
+    if (!id || !listEl || wsDragId) return;
+    requestAnimationFrame(() => {
+      listEl?.querySelector<HTMLElement>(".selected")?.scrollIntoView({ block: "nearest" });
+    });
+  });
+
   // ---- resizing: sidebar width ----
   let sidebarEl = $state<HTMLElement | null>(null);
 
@@ -291,18 +375,57 @@
         Workspaces
         <Icon name="chevronDown" size={13} />
       </button>
-      <button class="add" title="New workspace" onclick={onNewWorkspace} aria-label="New workspace">
-        <Icon name="plus" size={15} />
-      </button>
+      <div class="head-actions">
+        <button
+          class="head-act"
+          class:on={searching}
+          title="Filter workspaces and agents"
+          aria-label="Filter workspaces and agents"
+          aria-pressed={searching}
+          onclick={toggleSearch}
+        >
+          <Icon name="filter" size={14} />
+        </button>
+        <button
+          class="head-act"
+          title={allCollapsed ? "Expand all" : "Collapse all"}
+          aria-label={allCollapsed ? "Expand all" : "Collapse all"}
+          onclick={() => app.setAllWorkspacesCollapsed(!allCollapsed)}
+        >
+          <Icon name={allCollapsed ? "chevronsDown" : "chevronsUp"} size={14} />
+        </button>
+        <button class="head-act" title="New workspace" onclick={onNewWorkspace} aria-label="New workspace">
+          <Icon name="plus" size={15} />
+        </button>
+      </div>
     </header>
 
-    <ul class="list ws-list" bind:this={listEl}>
-      {#each app.liveWorkspaces as ws (ws.id)}
+    {#if searching}
+      <div class="search">
+        <Icon name="search" size={13} />
+        <input
+          bind:this={searchEl}
+          bind:value={query}
+          use:focusOnMount
+          placeholder="Filter…"
+          spellcheck="false"
+          onkeydown={searchKey}
+        />
+        {#if query}
+          <button class="clear" title="Clear filter" aria-label="Clear filter" onclick={() => { query = ""; searchEl?.focus(); }}>
+            <Icon name="close" size={12} />
+          </button>
+        {/if}
+      </div>
+    {/if}
+
+    <ul class="list ws-list" role="tree" aria-label="Workspaces" bind:this={listEl}>
+      {#each rows as { ws, roster } (ws.id)}
         {@const editing = editingWsId === ws.id}
         {@const missing = app.isPathMissing(ws.path)}
-        {@const roster = app.rosterOf(ws.id)}
-        {@const open = !app.wsCollapsed[ws.id]}
+        {@const open = q ? true : !app.wsCollapsed[ws.id]}
         {@const attention = app.attentionCountOf(ws.id)}
+        {@const working = roster.filter((a) => a.state === "working").length}
         {@const selected = ws.id === app.activeWorkspaceId}
         {@const holdsSelection = selected && !!app.activeAgent}
         <li class="node" class:holds-selection={holdsSelection} animate:flip={{ duration: 160 }}>
@@ -317,7 +440,7 @@
             role="treeitem"
             aria-expanded={open}
             aria-selected={selected}
-            tabindex="0"
+            tabindex={tabId === ws.id ? 0 : -1}
             onpointerdown={(e) => wsPointerDown(e, ws)}
             onpointermove={wsPointerMove}
             onpointerup={wsPointerUp}
@@ -327,16 +450,41 @@
             onkeydown={(e) => wsKey(e, ws)}
             oncontextmenu={(e) => wsMenu(e, ws)}
           >
-            <span class="twisty" class:open aria-hidden="true">
-              <Icon name="chevronDown" size={13} />
-            </span>
             <!--
-              The workspace's hue lives here and nowhere else on the row: one
-              small mark, favicon-sized, which is what a hue is for. A missing
-              folder overrides it — those agents cannot launch, so it reads broken.
+              One column, two marks. At rest it is the workspace's BADGE — a
+              tinted tile carrying the project's initial, which is the fastest
+              thing to scan down a rail of similar names, and the only place the
+              hue lives. On hover it becomes the fold arrow, so the twisty costs
+              no width of its own and the name keeps every pixel it can get.
             -->
-            <span class="ws-icon" style={missing ? undefined : `color:${ws.color}`}>
-              <Icon name={missing ? "alert" : ws.isWorktree ? "branch" : "folder"} size={15} />
+            <span
+              class="lead"
+              role="button"
+              tabindex="-1"
+              title={open ? "Collapse" : "Expand"}
+              onpointerdown={(e) => e.stopPropagation()}
+              onclick={(e) => {
+                e.stopPropagation();
+                app.toggleWorkspaceCollapsed(ws.id);
+              }}
+              onkeydown={(e) => e.stopPropagation()}
+            >
+              <span
+                class="ws-icon"
+                class:missing
+                style={missing ? undefined : `--hue:${ws.color}`}
+              >
+                {#if missing}
+                  <Icon name="alert" size={12} />
+                {:else if ws.isWorktree}
+                  <Icon name="branch" size={12} />
+                {:else}
+                  {initial(ws.name)}
+                {/if}
+              </span>
+              <span class="twisty" class:open aria-hidden="true">
+                <Icon name="chevronDown" size={13} />
+              </span>
             </span>
 
             {#if editing}
@@ -354,7 +502,15 @@
                 onblur={() => commitWs(ws.id)}
               />
             {:else}
-              <span class="ws-name">{ws.name}</span>
+              {@const parts = hl(ws.name)}
+              <span class="ws-name"
+                >{#if parts}{parts[0]}<mark>{parts[1]}</mark>{parts[2]}{:else}{ws.name}{/if}</span
+              >
+              <!-- Folded, but not silent: a project with agents running says so,
+                   otherwise a bare count reads as "nothing is happening in here". -->
+              {#if !open && working > 0 && attention === 0}
+                <span class="ws-working" title="{working} agent(s) working"></span>
+              {/if}
               <!--
                 A badge is only in the layout when there IS one, and the count is
                 dropped while the workspace is open, since its agents are right
@@ -392,7 +548,7 @@
           {#if open && !editing}
             <!-- The guide inherits the workspace's hue at 22%: enough to tie a run
                  of agents to its parent, far too quiet to read as decoration. -->
-            <ul class="agent-list" style="--ws-hue:{ws.color}">
+            <ul class="agent-list" role="group" style="--ws-hue:{ws.color}">
               {#each roster as agent (agent.id)}
                 {@const meta = STATE_META[agent.state]}
                 {@const aEditing = editingAgentId === agent.id}
@@ -411,7 +567,7 @@
                     data-row
                     role="treeitem"
                     aria-selected={isActive}
-                    tabindex="0"
+                    tabindex={tabId === agent.id ? 0 : -1}
                     title={aEditing ? undefined : `${agent.name} — ${stateText(agent.state)}`}
                     onclick={() => !aEditing && app.setActiveAgent(agent.id)}
                     ondblclick={() => startRenameAgent(agent)}
@@ -450,10 +606,11 @@
                         onblur={() => commitAgent(agent.id)}
                       />
                     {:else}
+                      {@const parts = hl(agent.name)}
                       <span
                         class="agent-name"
                         class:attn={agent.state === "blocked" || agent.state === "done"}
-                      >{agent.name}</span>
+                      >{#if parts}{parts[0]}<mark>{parts[1]}</mark>{parts[2]}{:else}{agent.name}{/if}</span>
                       {#if tabNo >= 1 && tabNo <= 9}<span class="kbd">⌘{tabNo}</span>{/if}
                       <span class="row-actions">
                         <button
@@ -485,8 +642,10 @@
         </li>
       {/each}
 
-      {#if app.liveWorkspaces.length === 0}
-        <li class="hint">No workspaces. Click + to add one.</li>
+      {#if rows.length === 0}
+        <li class="hint">
+          {q ? `No workspace or agent matches “${query.trim()}”.` : "No workspaces. Click + to add one."}
+        </li>
       {/if}
     </ul>
   </section>
@@ -546,22 +705,23 @@
     flex: 0 0 auto;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 8px 8px 10px;
+    padding: 7px 6px 5px 8px;
   }
   /* A panel title, not a micro-label: sentence case at reading size with the
      panel's own menu hung off it, the way a tool window is titled in the IDE. */
   .group-title {
     display: flex;
     align-items: center;
-    gap: 3px;
-    padding: 3px 5px 3px 4px;
+    gap: 2px;
+    padding: 2px 4px 2px 4px;
     border: 0;
     border-radius: 5px;
     background: transparent;
     font-family: inherit;
-    font-size: 13.5px;
+    font-size: 12px;
     font-weight: 600;
-    color: var(--text);
+    letter-spacing: 0.01em;
+    color: var(--text-muted);
     cursor: pointer;
     transition: background 0.12s, color 0.12s;
   }
@@ -570,21 +730,81 @@
   }
   .group-title:hover {
     background: var(--surface-3);
+    color: var(--text);
   }
-  .add {
-    width: 24px;
-    height: 24px;
+  /* Ghost glyphs, not boxed buttons: panel chrome should sit behind the list it
+     titles, and a boxed control at the top of a rail reads louder than any row. */
+  .head-actions {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+  }
+  .head-act {
+    width: 22px;
+    height: 22px;
     padding: 0;
     display: grid;
     place-items: center;
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    background: var(--surface-3);
-    color: var(--text-secondary);
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-faint);
     cursor: pointer;
-    transition: all 0.14s;
+    transition: background 0.12s, color 0.12s;
   }
-  .add:hover {
+  .head-act:hover {
+    background: var(--surface-3);
+    color: var(--text);
+  }
+  .head-act.on {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  /* ---- filter field ---- */
+  .search {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0 6px 5px;
+    padding: 0 5px 0 7px;
+    height: 26px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text-faint);
+  }
+  .search:focus-within {
+    border-color: var(--accent-line);
+  }
+  .search input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    font-family: inherit;
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .search input::placeholder {
+    color: var(--text-ghost);
+  }
+  .clear {
+    width: 17px;
+    height: 17px;
+    flex-shrink: 0;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+  }
+  .clear:hover {
     background: var(--surface-4);
     color: var(--text);
   }
@@ -592,7 +812,7 @@
   .list {
     list-style: none;
     margin: 0;
-    gap: 3px;
+    gap: 1px;
     /* A hair of clearance on both sides so a row's highlight reads as its own
        rounded shape rather than as a band clipped by the panel's edges.
        Indentation lives in each row's padding, so a nested row's highlight still
@@ -604,6 +824,27 @@
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+    transition: scrollbar-color 0.2s;
+  }
+  .list:hover {
+    scrollbar-color: var(--surface-4) transparent;
+  }
+  .list::-webkit-scrollbar {
+    width: 8px;
+  }
+  .list::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 8px;
+    background-clip: content-box;
+    background-color: transparent;
+  }
+  .list:hover::-webkit-scrollbar-thumb {
+    background-color: var(--surface-4);
+  }
+  .list::-webkit-scrollbar-thumb:hover {
+    background-color: var(--border-strong);
   }
   .node {
     display: flex;
@@ -613,7 +854,7 @@
      agents: whitespace does the grouping, so the indent can stay shallow and
      names keep their width. */
   .node + .node {
-    margin-top: 6px;
+    margin-top: 4px;
   }
 
   /* ---- shared row shell ---- */
@@ -623,10 +864,10 @@
     width: 100%;
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
     border: 0;
     /* Rounded at both ends: every row is a self-contained shape. */
-    border-radius: 7px;
+    border-radius: 6px;
     background: transparent;
     color: var(--text-secondary);
     text-align: left;
@@ -671,16 +912,26 @@
   .node.holds-selection > .ws .ws-name {
     color: var(--text);
   }
-  .node.holds-selection > .ws .ws-icon {
-    color: var(--text-secondary);
-  }
 
   /* ---- workspace row ---- */
   .ws {
-    height: 32px;
-    padding: 0 4px 0 8px;
+    height: 28px;
+    padding: 0 4px 0 6px;
     cursor: grab;
     touch-action: none;
+    /* Pins to the top of the scroller while its own agents scroll past, so a
+       long roster never leaves you asking which project you are looking at.
+       Needs an opaque fill — the rows below must not show through it. */
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--surface-1);
+  }
+  /* Sticky rows report their PINNED rect, which would poison the drop-slot maths
+     (and pin the row you are dragging to the top). While a drag is live the whole
+     list goes back to static flow. */
+  .ws-list:has(.dragging) .ws {
+    position: relative;
   }
   .ws.dragging {
     cursor: grabbing;
@@ -692,7 +943,7 @@
   .ws-name {
     flex: 1;
     min-width: 0;
-    font-size: 13.5px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-secondary);
     white-space: nowrap;
@@ -703,33 +954,54 @@
   .ws.missing .ws-name {
     color: var(--text-faint);
   }
-  .ws.missing .ws-icon {
-    color: var(--danger, #ff6b6b);
-  }
-  .ws-icon {
+
+  /* The shared badge / twisty column. Both marks are stacked in it; only one is
+     ever visible, so the column costs 18px once instead of twice. */
+  .lead {
+    position: relative;
     width: 18px;
     height: 18px;
     flex-shrink: 0;
-    display: grid;
-    place-items: center;
+    cursor: pointer;
   }
-
-  /* Fold arrow: 13px of ink, the full row height as hit area. */
-  .twisty {
-    width: 14px;
-    height: 100%;
-    flex-shrink: 0;
+  .lead > * {
+    position: absolute;
+    inset: 0;
     display: grid;
     place-items: center;
-    color: var(--text-ghost);
+    transition: opacity 0.12s ease;
+  }
+  /* A tinted tile with the project's initial: the hue is identity, and an initial
+     is quicker to pick out of a column of near-identical names than a folder. */
+  .ws-icon {
+    border-radius: 5px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--hue);
+    background: color-mix(in srgb, var(--hue) 16%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hue) 28%, transparent);
+  }
+  .ws-icon.missing {
+    --hue: var(--danger, #ff6b6b);
+  }
+  .twisty {
+    opacity: 0;
+    color: var(--text-muted);
     transform: rotate(-90deg);
-    transition: transform 0.13s ease, color 0.12s ease;
+    transition: transform 0.13s ease, opacity 0.12s ease;
   }
   .twisty.open {
     transform: rotate(0deg);
   }
-  .ws:hover .twisty {
-    color: var(--text-muted);
+  /* Hover swaps the badge for the fold arrow — same square, no reflow. */
+  .ws:hover .ws-icon,
+  .ws:focus-visible .ws-icon {
+    opacity: 0;
+  }
+  .ws:hover .twisty,
+  .ws:focus-visible .twisty {
+    opacity: 1;
   }
 
   /* ---- agent rows ---- */
@@ -738,11 +1010,11 @@
     list-style: none;
     /* Sits a touch below its workspace row, and its own rows are spaced like the
        top-level ones — separate pills read as separate rows. */
-    margin: 3px 0 0;
+    margin: 1px 0 0;
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 1px;
   }
   /* The guide is drawn, not bordered, so the rows themselves stay full-bleed. It
      carries the parent workspace's hue at 22% — enough to tie a run of agents to
@@ -762,16 +1034,19 @@
     background: color-mix(in srgb, var(--ws-hue) 22%, transparent);
   }
   .agent {
-    height: 30px;
-    /* 26px = the workspace row's own glyph column (8 pad + 14 twisty + 4 gap), so
-       the status dots sit exactly under the folder glyphs. */
-    padding: 0 4px 0 26px;
+    height: 26px;
+    /* Clears the pinned workspace header when a row is scrolled into view. */
+    scroll-margin-top: 30px;
+    scroll-margin-bottom: 4px;
+    /* 30px = the workspace row's own glyph column (6 pad + 18 lead + 6 gap), so
+       the status dots sit exactly under the project badges. */
+    padding: 0 4px 0 30px;
     cursor: pointer;
   }
   .agent-name {
     flex: 1;
     min-width: 0;
-    font-size: 13.5px;
+    font-size: 12.5px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -867,6 +1142,26 @@
     color: #fff;
     font-weight: 700;
   }
+  /* The filter hit, shown in the name itself — you can see WHY a row survived. */
+  .ws-name :global(mark),
+  .agent-name :global(mark) {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    color: var(--text);
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+
+  /* Folded-project activity: the same ring the agent rows use, shrunk to a hint. */
+  .ws-working {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border-top-color: var(--accent);
+    animation: spin 0.9s linear infinite;
+  }
+
   .kbd {
     flex: 0 0 auto;
     font-size: 10.5px;
@@ -876,8 +1171,8 @@
 
   /* ---- status glyphs (the tree's only state colour) ---- */
   .status {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     flex-shrink: 0;
     display: grid;
     place-items: center;
@@ -956,13 +1251,13 @@
   /* An expanded workspace with no agents offers the action instead of a dead end. */
   .empty {
     display: flex;
-    padding: 1px 0 2px 26px;
+    padding: 1px 0 2px 30px;
   }
   .empty-btn {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    height: 26px;
+    height: 24px;
     padding: 0 7px;
     border: 0;
     border-radius: 5px;

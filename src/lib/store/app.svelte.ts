@@ -302,6 +302,35 @@ export interface Workspace {
   isWorktree: boolean;
 }
 
+/**
+ * One note a reviewer wrote against a line of a diff, waiting to be sent to an agent.
+ *
+ * Anchored by (path, side, line) rather than by content: the reader is pointing at a
+ * place in the change, and that is what the agent has to be told. `code` is kept so the
+ * message can quote the line the note is about — an agent reading "line 42" alone would
+ * have to go and look it up, and the line may have moved by then.
+ */
+export interface ReviewComment {
+  id: string;
+  workspaceId: string;
+  /** Repo-relative path of the file the comment is on. */
+  path: string;
+  /** Line number on `side`, or null for a comment about the file as a whole. */
+  line: number | null;
+  /** Which side of the diff the line number belongs to. */
+  side: "old" | "new";
+  /** Text of the commented line, quoted back in the message. */
+  code: string;
+  /**
+   * What the line IS in the diff: added, removed, or unchanged context. Without it the
+   * agent cannot tell whether a note is about new code or about code that just went
+   * away. Optional so comments written before this existed still load.
+   */
+  kind?: "add" | "del" | "ctx";
+  body: string;
+  createdAt: number;
+}
+
 const KIND_LABELS: Record<AgentKind, string> = {
   claude: "Claude",
   shell: "Shell",
@@ -461,10 +490,51 @@ class AppState {
    * stale copy of a file an agent has since rewritten.
    */
   codeOpenByWs = $state<Record<string, { paths: string[]; active: string | null }>>({});
-  /** Which panel the Code view's left rail shows: the file tree or the git changes. */
-  codeSideTab = $state<"files" | "changes">("files");
   /** Width (px) of the Code view's left rail — user-resizable, persisted. */
   codeTreeWidth = $state(260);
+  /** Width (px) of the Review page's changed-files rail — user-resizable, persisted. */
+  reviewRailWidth = $state(300);
+  /**
+   * Review comments waiting to be handed to an agent, per workspace.
+   *
+   * A comment is a note the reader wrote against one line of a diff. It lives here —
+   * not in the terminal — until the reader sends the batch, because the point is to
+   * read a whole change first and say everything at once.
+   */
+  reviewComments = $state<Record<string, ReviewComment[]>>({});
+
+  /** Every comment on a workspace, oldest first; optionally only those on one file. */
+  reviewCommentsFor(wsId: string, path?: string): ReviewComment[] {
+    const list = this.reviewComments[wsId] ?? [];
+    return path ? list.filter((c) => c.path === path) : list;
+  }
+
+  addReviewComment(input: Omit<ReviewComment, "id" | "createdAt">): ReviewComment {
+    const c: ReviewComment = { ...input, id: uid("rc"), createdAt: Date.now() };
+    this.reviewComments[input.workspaceId] = [...(this.reviewComments[input.workspaceId] ?? []), c];
+    this.persist();
+    return c;
+  }
+
+  updateReviewComment(wsId: string, id: string, body: string) {
+    const list = this.reviewComments[wsId];
+    const c = list?.find((x) => x.id === id);
+    if (!c) return;
+    c.body = body;
+    this.persist();
+  }
+
+  removeReviewComment(wsId: string, id: string) {
+    const list = this.reviewComments[wsId];
+    if (!list) return;
+    this.reviewComments[wsId] = list.filter((c) => c.id !== id);
+    this.persist();
+  }
+
+  clearReviewComments(wsId: string) {
+    this.reviewComments[wsId] = [];
+    this.persist();
+  }
   /** Height (px) of the Code view's run panel. Zero means collapsed. */
   codeRunHeight = $state(0);
   /** Show dotfiles in the Code view's file tree. */
@@ -2307,12 +2377,13 @@ class AppState {
       wsCollapsed: this.wsCollapsed,
       notesListWidth: this.notesListWidth,
       codeOpenByWs: this.codeOpenByWs,
-      codeSideTab: this.codeSideTab,
       codeTreeWidth: this.codeTreeWidth,
+      reviewRailWidth: this.reviewRailWidth,
       codeRunHeight: this.codeRunHeight,
       codeShowHidden: this.codeShowHidden,
       codeDiffSplit: this.codeDiffSplit,
       codeViewedByWs: this.codeViewedByWs,
+      reviewComments: this.reviewComments,
     };
   }
 
@@ -2533,10 +2604,20 @@ class AppState {
           }
           this.codeOpenByWs = restored;
         }
-        if (data.codeSideTab === "files" || data.codeSideTab === "changes")
-          this.codeSideTab = data.codeSideTab;
         if (typeof data.codeTreeWidth === "number")
           this.codeTreeWidth = Math.max(160, Math.min(560, data.codeTreeWidth));
+        if (typeof data.reviewRailWidth === "number")
+          this.reviewRailWidth = Math.max(180, Math.min(620, data.reviewRailWidth));
+        if (data.reviewComments && typeof data.reviewComments === "object") {
+          const byWs: Record<string, ReviewComment[]> = {};
+          for (const [wsId, list] of Object.entries(data.reviewComments)) {
+            if (!Array.isArray(list)) continue;
+            byWs[wsId] = (list as ReviewComment[]).filter(
+              (c) => c && typeof c.id === "string" && typeof c.body === "string",
+            );
+          }
+          this.reviewComments = byWs;
+        }
         if (typeof data.codeRunHeight === "number")
           this.codeRunHeight = Math.max(0, Math.min(900, data.codeRunHeight));
         if (typeof data.codeShowHidden === "boolean") this.codeShowHidden = data.codeShowHidden;
