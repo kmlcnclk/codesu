@@ -2,34 +2,29 @@
 
 ## Design Concept
 
-The Codesu logo represents **orchestration, fluidity, and intelligent coordination** through a water droplet metaphor combined with connected network nodes.
+The Codesu mark is a **silver "C" carrying a `</>` code glyph**, with motion streaks running off its left
+side — the letter for the name, the glyph for what the app does, the streaks for how fast it moves.
 
 ### Visual Elements
 
-**Water Droplet (Center)**
-- Represents fluidity and adaptability
-- The flowing curves symbolize the seamless movement of data and agents
-- Gradient from cyan to purple suggests diversity and harmonious integration
+- **The C** — heavy silver letterform, brushed-metal gradient, opening to the right
+- **`</>`** — set inside the bowl, the coding cue
+- **Motion streaks** — three lines trailing off the left of the C
+- **App tile** — near-black rounded squircle, corner radius 23.3% of the side
 
-**Connected Nodes (Hexagon)**
-- Six nodes arranged in a hexagon pattern
-- Symbolize multiple agents working in perfect harmony
-- Connections show real-time coordination and communication
-- Colors: Cyan (input) → Purple/Pink (processing/output)
+### Sizing rule
 
-**Central Orb**
-- Represents the core intelligence at the heart of orchestration
-- The brain/control center coordinating all agent activities
+The tile fills **98% of the icon canvas**. This matters: an earlier export had it at 80%, which made
+Codesu look visibly smaller than neighbouring icons in the macOS dock. If you re-export, keep the
+tile at 98% and the corners transparent (not black), so the icon reads correctly on light backgrounds.
 
 ### Color Palette
 
 | Color | Hex | Usage |
 |-------|-----|-------|
-| **Cyan** | `#00D9FF` | Input nodes, connectivity |
-| **Blue** | `#00B4E6` | Primary accent, flow |
-| **Purple** | `#B366FF` | Processing, intelligence |
-| **Pink** | `#FF66FF` | Output, transformation |
-| **Dark Navy** | `#0A0E1A` | Background |
+| **White** | `#ffffff` | Highlight edge of the C |
+| **Silver** | `#b8bcc2` | Body of the C and glyph |
+| **Near-black** | `#0b0b0c` | App tile |
 
 ## Design Principles
 
@@ -56,12 +51,12 @@ The Codesu logo represents **orchestration, fluidity, and intelligent coordinati
 ## File Locations
 
 ### Source Files
-- `src-tauri/icons/logo_source.png` — High-quality source (512×512)
+- `src-tauri/icons/logo_source.png` — Rendered source for icon generation (1024×1024)
 
 ### App Icons
 ```
 src-tauri/icons/
-├── icon.png              (256×256) — Main app icon
+├── icon.png              (512×512) — Main app icon
 ├── icon.icns             (macOS)
 ├── icon.ico              (Windows, multiple sizes)
 ├── 128x128.png          (HiDPI)
@@ -117,6 +112,7 @@ The logo uses high-contrast colors:
 |---------|------|---------|
 | 1.0 | Jul 2026 | Initial design - Water + Flow concept |
 | 1.1 | Jul 2026 | Refined gradients and node positioning |
+| 2.0 | Sep 2026 | "C" + `</>` mark with motion streaks; tile rescaled 80% → 98% of canvas |
 
 ## Future Variations
 
@@ -127,11 +123,19 @@ Planned logo variants:
 - [ ] Icon set with related symbols
 - [ ] 3D render (for marketing)
 
-## Design Tools Used
+## Regenerating the icons
 
-- Adobe Illustrator (original design)
-- Figma (refinement)
-- ImageMagick / PIL (export and resizing)
+`src-tauri/icons/logo_source.png` (1024×1024, transparent corners) is the source of truth.
+After replacing it:
+
+1. Run `pnpm tauri icon src-tauri/icons/logo_source.png -o src-tauri/icons`
+2. Delete the `ios/` and `android/` directories it also emits — Codesu is desktop-only
+3. Copy a 512×512 version to `static/favicon.png`
+
+Keep the tile at 98% of the canvas with transparent corners (see **Sizing rule** above).
+
+> `src-tauri/icons/logo.svg` is an older vector experiment and does **not** match the shipped
+> icons. Do not regenerate from it.
 
 ## License
 

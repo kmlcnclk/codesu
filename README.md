@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src-tauri/icons/icon.png" alt="Codesu" width="128" height="128">
+</p>
+
 # Codesu
 
 **A desktop cockpit for running many Claude Code agents at once.**
