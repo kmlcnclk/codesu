@@ -8,13 +8,6 @@
 //! - flusher — coalesces bursts into ~8ms / 64KB batches before crossing the IPC boundary.
 //!
 //! Coalescing is the key perf lever against Claude Code's bursty, colored output.
-//!
-//! The process-lifecycle primitives here — `term`, `kill9`, `alive`, `wait_for_exit`,
-//! `KILL_GRACE` — plus `resolve_cwd` and `CLAUDE_SESSION_MARKERS` are `pub(crate)`
-//! because [`crate::agent`] (the headless backend) needs exactly the same semantics:
-//! SIGTERM so `claude` flushes its session, SIGKILL only after the grace period, and a
-//! cwd that must exist rather than silently becoming `$HOME`. They are deliberately NOT
-//! duplicated — a divergence between the two shutdown paths is how children get orphaned.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -56,12 +49,12 @@ struct PtySession {
 }
 
 /// Grace period between SIGTERM and SIGKILL.
-pub(crate) const KILL_GRACE: Duration = Duration::from_millis(1800);
+const KILL_GRACE: Duration = Duration::from_millis(1800);
 /// How often the grace period is re-checked while waiting for children to exit.
 const KILL_POLL: Duration = Duration::from_millis(25);
 
 /// Send SIGTERM to a process and its group so an interactive child (claude) is hung up.
-pub(crate) fn term(pid: u32) {
+fn term(pid: u32) {
     let p = pid as i32;
     unsafe {
         libc::kill(p, libc::SIGTERM);
@@ -75,7 +68,7 @@ pub(crate) fn term(pid: u32) {
 /// This is the escalation `term` promises and portable-pty does NOT provide:
 /// `ChildKiller::kill` sends SIGHUP, which is exactly the signal the child has already
 /// been ignoring for a full grace period by the time we get here.
-pub(crate) fn kill9(pid: u32) {
+fn kill9(pid: u32) {
     let p = pid as i32;
     unsafe {
         libc::kill(p, libc::SIGKILL);
@@ -91,7 +84,7 @@ pub(crate) fn kill9(pid: u32) {
 /// guard, not a proof: a child that has already been reaped could in principle have had
 /// its pid recycled within the grace period, and a child that has exited but not yet been
 /// reaped still answers `true` (signalling a zombie is a harmless no-op).
-pub(crate) fn alive(pid: u32) -> bool {
+fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
@@ -101,7 +94,7 @@ pub(crate) fn alive(pid: u32) -> bool {
 /// flat sleep beachballs the quit for the full grace period even when every child is
 /// already gone — or when there are no children at all, in which case this returns without
 /// sleeping once.
-pub(crate) fn wait_for_exit(pids: &[u32], grace: Duration) {
+fn wait_for_exit(pids: &[u32], grace: Duration) {
     let deadline = Instant::now() + grace;
     while pids.iter().any(|&pid| alive(pid)) {
         let now = Instant::now();
@@ -156,7 +149,7 @@ pub struct PtyManager {
 /// Only session-scoped markers are removed. Real configuration (`ANTHROPIC_*`,
 /// `CLAUDE_CODE_USE_BEDROCK`, and every other `CLAUDE_CODE_*` setting) is left alone —
 /// the user set those deliberately and they must reach the agent.
-pub(crate) const CLAUDE_SESSION_MARKERS: &[&str] = &[
+const CLAUDE_SESSION_MARKERS: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ID",
@@ -189,7 +182,7 @@ fn scrub_claude_session_markers(cmd: &mut CommandBuilder) {
 /// So a missing directory is an error the UI can show, not a silent redirect.
 ///
 /// `None` (the system terminal, which has no workspace) legitimately means `$HOME`.
-pub(crate) fn resolve_cwd(cwd: Option<String>) -> Result<Option<String>, String> {
+fn resolve_cwd(cwd: Option<String>) -> Result<Option<String>, String> {
     match cwd.map(|d| d.trim().to_string()).filter(|d| !d.is_empty()) {
         Some(dir) => {
             if std::path::Path::new(&dir).is_dir() {

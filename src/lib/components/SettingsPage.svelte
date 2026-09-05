@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { app, type AgentUi, type Shortcut } from "$lib/store/app.svelte";
+  import { app, type Shortcut } from "$lib/store/app.svelte";
   import Icon from "./Icon.svelte";
 
   let newPath = $state("");
@@ -25,27 +25,6 @@
   function removeProject(path: string) {
     app.removeDefaultProject(path);
   }
-
-  /**
-   * The two agent interfaces, with the trade-off spelled out rather than left to be
-   * discovered. Chat mode is genuinely more limited today (no permission prompts, no
-   * slash-command picker), and a user who picks it without knowing that reads the missing
-   * pieces as bugs.
-   */
-  const INTERFACES: { id: AgentUi; title: string; blurb: string; caveat: string }[] = [
-    {
-      id: "terminal",
-      title: "Terminal",
-      blurb: "Claude Code's own interface, running in a real terminal.",
-      caveat: "Everything the CLI can do: permission prompts, plan approval, / commands, @ file mentions.",
-    },
-    {
-      id: "chat",
-      title: "Chat",
-      blurb: "Claude runs in the background; Codesu renders the conversation.",
-      caveat: "Tools are auto-approved (acceptEdits) — no permission prompts yet. No / picker or @ mentions.",
-    },
-  ];
 
   function startRecordingKey(shortcutId: string) {
     editingId = shortcutId;
@@ -119,45 +98,12 @@
   <header class="page-head">
     <div class="titles">
       <h1>Settings</h1>
-      <p>Agent interface, default projects and keyboard shortcuts for Codesu.</p>
+      <p>Default projects and keyboard shortcuts for Codesu.</p>
     </div>
   </header>
 
   <div class="scroll">
    <div class="wrap">
-  <!-- Agent Interface Section -->
-  <div class="section">
-    <h2 class="section-title">Agent interface</h2>
-    <p class="desc">
-      How a Claude agent's pane looks and behaves. Both run the same Claude Code and the
-      same session — switching does not fork or lose a conversation. Shell agents and the
-      system terminal always use a terminal.
-    </p>
-
-    <div class="ui-choices">
-      {#each INTERFACES as option (option.id)}
-        <button
-          class="ui-choice"
-          class:on={app.agentUi === option.id}
-          aria-pressed={app.agentUi === option.id}
-          onclick={() => app.setAgentUi(option.id)}
-        >
-          <span class="ui-radio" aria-hidden="true"></span>
-          <span class="ui-text">
-            <span class="ui-title">{option.title}</span>
-            <span class="ui-blurb">{option.blurb}</span>
-            <span class="ui-caveat">{option.caveat}</span>
-          </span>
-        </button>
-      {/each}
-    </div>
-
-    <p class="empty-hint">
-      Switching puts every running Claude agent to sleep. Nothing is lost — each one shows
-      its Resume button and picks the conversation up in the new interface when you click it.
-    </p>
-  </div>
-
   <!-- Default Projects Section -->
   <div class="section">
     <h2 class="section-title">Default projects</h2>
@@ -289,68 +235,6 @@
   .wrap {
     max-width: 640px;
     margin: 0 auto;
-  }
-
-  /* ---------- agent interface picker ---------- */
-
-  .ui-choices {
-    display: grid;
-    gap: 8px;
-    margin-bottom: 10px;
-  }
-  .ui-choice {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 11px 13px;
-    text-align: left;
-    font: inherit;
-    color: var(--text-secondary);
-    background: var(--surface-1);
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    cursor: pointer;
-    transition: border-color 0.12s, background 0.12s;
-  }
-  .ui-choice:hover {
-    background: var(--surface-2);
-    border-color: var(--border-strong);
-  }
-  .ui-choice.on {
-    border-color: var(--accent, #6e8bff);
-    background: color-mix(in srgb, var(--accent, #6e8bff) 8%, transparent);
-  }
-  .ui-radio {
-    width: 14px;
-    height: 14px;
-    margin-top: 2px;
-    flex-shrink: 0;
-    border-radius: 50%;
-    border: 1.5px solid var(--border-strong);
-    box-sizing: border-box;
-  }
-  .ui-choice.on .ui-radio {
-    border-color: var(--accent, #6e8bff);
-    border-width: 4px;
-  }
-  .ui-text {
-    display: grid;
-    gap: 2px;
-    min-width: 0;
-  }
-  .ui-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .ui-blurb {
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-  .ui-caveat {
-    font-size: 11.5px;
-    line-height: 1.45;
-    color: var(--text-faint);
   }
 
   .section {
