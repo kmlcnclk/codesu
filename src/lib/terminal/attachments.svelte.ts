@@ -12,14 +12,23 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { makeAttachment, type TaskAttachment } from "$lib/store/app.svelte";
+import { app, makeAttachment, type TaskAttachment } from "$lib/store/app.svelte";
 import type { TerminalHandle } from "./createTerminal";
 
 /** Live terminals, so a drop can reach the pane the pointer was actually over. */
 const panes = new Map<string, TerminalHandle>();
 
 /** What each pane has attached this session, newest last. Rendered by its tray. */
-const byPane = $state<Record<string, TaskAttachment[]>>({});
+/*
+ * Reassigned rather than mutated in place.
+ *
+ * A pane's tray reads `byPane[id]` before that key exists, and growing an existing
+ * array (or adding a brand-new key) is the case where a reader that saw `undefined`
+ * can miss the update — which showed up as a file being typed at the prompt while the
+ * tray still said "Nothing yet". Replacing the whole record makes the change
+ * unmissable, and these lists are a handful of entries.
+ */
+let byPane = $state<Record<string, TaskAttachment[]>>({});
 
 /** When each (pane, path) was last sent, for collapsing one gesture reported twice. */
 const recent = new Map<string, number>();
@@ -44,14 +53,19 @@ const pending = new Map<string, string[]>();
 /** Per-pane message for its tray ("waiting for the agent", or why nothing happened). */
 export const notices = $state<Record<string, string | null>>({});
 
-/** The pane a drag is currently over, and how many files it carries. */
-export const dragState = $state<{ agentId: string | null; count: number }>({
-  agentId: null,
-  count: 0,
-});
+/**
+ * The pane a drag was last seen over. Not reactive and not exported: nothing renders
+ * it any more (a drag paints nothing over the pane) — it exists only so a drop whose
+ * coordinates cannot be resolved still knows where the file was headed.
+ */
+let lastDragTarget: string | null = null;
 
-/** Thumbnail-able files the asset protocol has been granted, by path. */
-const allowed = $state<Set<string>>(new Set());
+/**
+ * Thumbnail-able files the asset protocol has been granted, by path. Reassigned for
+ * the same reason as `byPane`: a chip renders before the grant comes back, and must
+ * re-render when it does.
+ */
+let allowed = $state<string[]>([]);
 
 export function attachmentsOf(agentId: string): TaskAttachment[] {
   return byPane[agentId] ?? [];
@@ -59,7 +73,7 @@ export function attachmentsOf(agentId: string): TaskAttachment[] {
 
 /** True once the asset protocol will serve this image to the webview. */
 export function isThumbnailable(path: string): boolean {
-  return allowed.has(path);
+  return allowed.includes(path);
 }
 
 export function thumbnailSrc(path: string): string {
@@ -128,16 +142,18 @@ export function attach(agentId: string, paths: string[]): string[] {
   });
   if (fresh.length === 0) return [];
 
-  const list = byPane[agentId] ?? (byPane[agentId] = []);
+  const list = byPane[agentId] ?? [];
   const have = new Set(list.map((a) => a.path));
+  const added: TaskAttachment[] = [];
   for (const path of fresh) {
     // One chip per file, however many times its path is sent.
-    if (!have.has(path)) {
-      const item = makeAttachment(path);
-      list.push(item);
-      if (item.isImage) void grantThumbnail(path);
-    }
+    if (have.has(path)) continue;
+    have.add(path);
+    const item = makeAttachment(path);
+    added.push(item);
+    if (item.isImage) void grantThumbnail(path);
   }
+  if (added.length > 0) byPane = { ...byPane, [agentId]: [...list, ...added] };
   handle.paste(fresh.map(quotePath).join(" ") + " ");
   return fresh;
 }
@@ -150,11 +166,11 @@ export function insertAgain(agentId: string, path: string) {
 export function forget(agentId: string, id: string) {
   const list = byPane[agentId];
   if (!list) return;
-  byPane[agentId] = list.filter((a) => a.id !== id);
+  byPane = { ...byPane, [agentId]: list.filter((a) => a.id !== id) };
 }
 
 export function forgetAll(agentId: string) {
-  byPane[agentId] = [];
+  byPane = { ...byPane, [agentId]: [] };
 }
 
 /**
@@ -163,10 +179,10 @@ export function forgetAll(agentId: string) {
  * same rule the task dialog follows.
  */
 async function grantThumbnail(path: string) {
-  if (allowed.has(path)) return;
+  if (allowed.includes(path)) return;
   try {
     await invoke("allow_asset", { path });
-    allowed.add(path);
+    allowed = [...allowed, path];
   } catch (err) {
     // Not fatal: the tray falls back to a file glyph.
     console.warn("[Codesu] no thumbnail for", path, err);
@@ -211,24 +227,29 @@ function paneAt(x: number, y: number): string | null {
 }
 
 /**
- * Which pane a drag is over.
+ * The pane genuinely under a drag, or null.
  *
  * Tauri reports the position in PHYSICAL pixels, so it normally needs dividing by the
  * device pixel ratio — but that assumption is exactly what made dropping unreliable:
  * get the scale wrong (an external monitor, a scaled display, a ratio that is not the
- * window's) and the point lands somewhere else entirely, hits no pane, and the drop
- * quietly does nothing.
+ * window's) and the point lands somewhere else entirely and hits no pane. So try the
+ * scaled point, then the raw one.
  *
- * So try the scaled point, then the raw one, and finally fall back to whichever pane
- * the drag was last seen over. Any answer beats silently dropping the file.
+ * No fallbacks here on purpose: this is the honest answer to "where is the pointer",
+ * which is what `lastDragTarget` must record. Guessing belongs to the drop alone.
  */
-function targetOf(position: { x: number; y: number }): string | null {
+function paneUnder(position: { x: number; y: number }): string | null {
   const dpr = window.devicePixelRatio || 1;
-  return (
-    paneAt(position.x / dpr, position.y / dpr) ??
-    paneAt(position.x, position.y) ??
-    dragState.agentId
-  );
+  return paneAt(position.x / dpr, position.y / dpr) ?? paneAt(position.x, position.y);
+}
+
+/**
+ * Where a DROP should go. Generous by design — the failure mode being fixed is a file
+ * that silently goes nowhere — so an unresolvable position falls back to wherever the
+ * drag was last seen, and finally to the agent you are looking at.
+ */
+function dropTargetOf(position: { x: number; y: number }): string | null {
+  return paneUnder(position) ?? lastDragTarget ?? app.activeAgent?.id ?? null;
 }
 
 /**
@@ -254,28 +275,14 @@ declare global {
 export function installFileDrop(): Promise<() => void> {
   if (window.__codesuFileDrop) return window.__codesuFileDrop;
 
-  /**
-   * Watchdog. `over` fires continuously while a drag is inside the window, so a gap
-   * means the drag is gone — and a `leave` that never arrives (the drag ended outside
-   * the window, or the webview reloaded mid-drag) would otherwise leave every pane
-   * wearing its drop overlay forever.
-   */
-  let idle: ReturnType<typeof setTimeout> | undefined;
-  const clearDrag = () => {
-    clearTimeout(idle);
-    idle = undefined;
-    dragState.agentId = null;
-    dragState.count = 0;
-  };
-  // The overlay is driven by dragState.agentId, so clearing it on `drop` must happen
-  // AFTER the target has been read — see the drop branch below.
-
-  // A real Tauri drag produces no mouse events, so any pointer movement is proof
-  // that no drag is in flight.
+  // A real Tauri drag produces no mouse events, so any pointer movement means the
+  // drag is over and the remembered target is stale.
   window.addEventListener("mousemove", () => {
-    if (dragState.agentId !== null) clearDrag();
+    lastDragTarget = null;
   });
-  window.addEventListener("blur", clearDrag);
+  window.addEventListener("blur", () => {
+    lastDragTarget = null;
+  });
 
   /*
    * Belt and braces: cancel the WEBVIEW's own drag handling too.
@@ -297,32 +304,31 @@ export function installFileDrop(): Promise<() => void> {
   const listening = getCurrentWebview().onDragDropEvent(({ payload }) => {
     /*
      * Tauri emits FOUR types: enter, over, drop, leave — and `enter` carries `paths`
-     * just like `drop` does. Switch on the type explicitly and attach on `drop`
-     * ALONE: an else-branch "everything that isn't over/leave is a drop" attached the
-     * file the moment the drag entered the window, and again when it landed. That was
-     * the duplicate — one on drag, one on drop.
+     * exactly like `drop` does. Hence the explicit switch: an else-branch treating
+     * "anything that isn't over/leave" as a drop attached the file when the drag
+     * arrived AND again when it landed. Files are attached on `drop` and nowhere else.
      */
     switch (payload.type) {
+      // enter / over attach nothing. They only record where the pointer really is, so
+      // a drop whose coordinates cannot be resolved still knows where it was headed.
       case "enter":
       case "over": {
-        // `dragState.agentId` is also the drop's last-resort target, so only overwrite
-        // it when the pointer is genuinely over a pane.
-        const over = targetOf(payload.position);
-        if (over) dragState.agentId = over;
-        if (payload.type === "enter") dragState.count = payload.paths?.length ?? 0;
-        clearTimeout(idle);
-        idle = setTimeout(clearDrag, 600);
+        const over = paneUnder(payload.position);
+        if (over) lastDragTarget = over;
         return;
       }
+
+      // The one place a file is attached.
       case "drop": {
-        const agentId = targetOf(payload.position);
+        const agentId = dropTargetOf(payload.position);
         const paths = payload.paths ?? [];
-        clearDrag();
+        lastDragTarget = null;
         if (agentId && paths.length) attach(agentId, paths);
         return;
       }
+
       case "leave":
-        clearDrag();
+        lastDragTarget = null;
         return;
     }
   });
