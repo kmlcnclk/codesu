@@ -862,24 +862,76 @@ class AppState {
    * above it would make the list read as if the branch were the project.
    */
   workspacesOf(projectId: string): Workspace[] {
-    return this.workspaces
-      .filter((w) => w.projectId === projectId && !w.archived)
-      .sort(
-        (a, b) =>
-          Number(!!b.primary) - Number(!!a.primary) ||
-          a.order - b.order ||
-          a.id.localeCompare(b.id),
-      );
+    const live = this.workspaces.filter((w) => w.projectId === projectId && !w.archived);
+    // Status is computed ONCE per workspace rather than inside the comparator, which
+    // would rescan every agent O(n log n) times.
+    const rank = new Map<string, number>();
+    const at = new Map<string, number>();
+    for (const w of live) {
+      const status = this.workspaceStatus(w.id);
+      rank.set(w.id, status ? STATE_RANK[status.state] : Object.keys(STATE_RANK).length);
+      at.set(w.id, status?.at ?? 0);
+    }
+    return live.sort(
+      (a, b) =>
+        // The same hard rule the agent roster follows: blocked → done → working → idle →
+        // exited, most-recently-changed first within a group. What wants you is at the
+        // top of the tree, whichever project or branch it happens to live in.
+        rank.get(a.id)! - rank.get(b.id)! ||
+        at.get(b.id)! - at.get(a.id)! ||
+        // Only then the resting order: a project's own folder above its branches.
+        Number(!!b.primary) - Number(!!a.primary) ||
+        a.order - b.order ||
+        a.id.localeCompare(b.id),
+    );
   }
 
   /**
    * Every live workspace in the order the RAIL shows them: project by project, each
-   * project's workspaces primary-first. `Workspace.order` is scoped to its project, so
+   * project's workspaces by urgency. `Workspace.order` is scoped to its project, so
    * a flat `liveWorkspaces` sort interleaves projects and tie-breaks on uid — fine as a
    * set, useless as "the next workspace to fall back to".
    */
   get railWorkspaces(): Workspace[] {
     return this.liveProjects.flatMap((p) => this.workspacesOf(p.id));
+  }
+
+  /**
+   * A workspace's status: the most urgent state among its live agents, and when that
+   * agent entered it.
+   *
+   * Deliberately NOT `rosterOf`, which drops kanban-done agents because they have left
+   * the tab strip. A workspace whose agents have all FINISHED is the clearest "done"
+   * there is — it is the one you want to go and review — so excluding them meant a
+   * workspace row could never go green, only quietly colourless.
+   *
+   * Null when nothing lives here: no agents, or only archived ones. A colourless row is
+   * the point — colour is reserved for "this one wants you".
+   */
+  workspaceStatus(workspaceId: string): { state: AgentState; at: number } | null {
+    let best: Agent | null = null;
+    for (const a of this.agents) {
+      if (a.workspaceId !== workspaceId || a.archived) continue;
+      const rank = STATE_RANK[a.state];
+      if (!best) {
+        best = a;
+        continue;
+      }
+      const bestRank = STATE_RANK[best.state];
+      // More urgent wins; within one state, whoever got there most recently.
+      if (rank < bestRank) best = a;
+      else if (rank === bestRank && (a.stateChangedAt ?? 0) > (best.stateChangedAt ?? 0)) best = a;
+    }
+    return best ? { state: best.state, at: best.stateChangedAt ?? best.createdAt } : null;
+  }
+
+  /**
+   * Rank for sorting a workspace row. Mirrors STATE_RANK, with "nothing here" sitting
+   * below every real state — an empty workspace is quieter than an idle one.
+   */
+  private workspaceRank(workspaceId: string): number {
+    const status = this.workspaceStatus(workspaceId);
+    return status ? STATE_RANK[status.state] : Object.keys(STATE_RANK).length;
   }
 
   /** The project a workspace belongs to (undefined for an orphan). */
@@ -1502,43 +1554,7 @@ class AppState {
     this.persist();
   }
 
-  /** Drop `draggedId` onto `targetId`'s slot. See {@link moveWorkspaceToIndex} for why
-   * the primary is excluded and the keys start at 1. */
-  reorderWorkspaces(draggedId: string, targetId: string) {
-    const owner = this.workspaces.find((w) => w.id === draggedId);
-    if (!owner || owner.primary) return;
-    const list = this.workspacesOf(owner.projectId).filter((w) => !w.primary);
-    const from = list.findIndex((w) => w.id === draggedId);
-    const to = list.findIndex((w) => w.id === targetId);
-    if (from === -1 || to === -1 || from === to) return;
-    const [moved] = list.splice(from, 1);
-    list.splice(to, 0, moved);
-    list.forEach((w, i) => (w.order = i + 1));
-    this.persist();
-  }
 
-  /**
-   * Move a workspace to an absolute slot among the other live workspaces (0-based,
-   * measured with the dragged item removed). Idempotent — safe to call on every
-   * pointer-move frame during a drag.
-   */
-  moveWorkspaceToIndex(draggedId: string, index: number) {
-    // Ordering is per project — a workspace can only be dragged among its siblings. The
-    // primary is excluded from the list entirely: workspacesOf pins it to the top no
-    // matter what `order` says, so including it would make a drop into slot 0 a silent
-    // no-op and leave one slot unreachable. `index` is therefore counted among the
-    // BRANCHES, and their keys start at 1 so the primary's 0 always sorts first.
-    const owner = this.workspaces.find((w) => w.id === draggedId);
-    if (!owner || owner.primary) return;
-    const list = this.workspacesOf(owner.projectId).filter((w) => !w.primary);
-    const from = list.findIndex((w) => w.id === draggedId);
-    if (from === -1) return;
-    const [moved] = list.splice(from, 1);
-    const at = Math.max(0, Math.min(index, list.length));
-    list.splice(at, 0, moved);
-    list.forEach((w, i) => (w.order = i + 1));
-    this.persist();
-  }
 
   /**
    * The default name for a new agent: the highest existing "<Kind> N" number in
