@@ -1248,14 +1248,29 @@
   .dash {
     color: var(--text-ghost);
   }
-  /* working — rotating ring */
+  /* working — one solid mark that rotates as it melts between a circle and a
+     rounded square. No track and no stroke: at 16px a hairline arc is fighting
+     antialiasing, whereas a filled shape stays crisp, and the silhouette
+     change carries the motion even when the rotation itself is too small to
+     read. The idle state is a hollow dot, so "working" is literally that dot
+     filled in and alive. */
   .spinner {
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    border: 1.5px solid color-mix(in srgb, var(--state) 25%, transparent);
-    border-top-color: var(--state);
-    animation: spin 0.7s linear infinite;
+    width: 9px;
+    height: 9px;
+    background: var(--state);
+    animation: morph 1.6s ease-in-out infinite;
+  }
+  @keyframes morph {
+    0%   { border-radius: 50%; transform: rotate(0deg)   scale(0.78); }
+    50%  { border-radius: 16%; transform: rotate(180deg) scale(1); }
+    100% { border-radius: 50%; transform: rotate(360deg) scale(0.78); }
+  }
+  /* Motion is decoration here — the filled mark already carries "working". */
+  @media (prefers-reduced-motion: reduce) {
+    .spinner {
+      animation: none;
+      border-radius: 30%;
+    }
   }
   @keyframes spin {
     to { transform: rotate(360deg); }
