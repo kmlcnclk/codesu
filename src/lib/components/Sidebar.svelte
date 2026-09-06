@@ -55,12 +55,14 @@
 
   /**
    * The state a workspace row wears: the most urgent state among its agents. The
-   * roster is already ordered blocked → done → working → idle, so its head IS the
-   * answer. Null when the workspace has no live agents — the row stays colourless,
-   * which is the whole point of reserving colour for "this one wants you".
+   * `workspaceStatus` already answers "the most urgent thing in here", counting agents
+   * that have FINISHED as well as running ones — a workspace whose work is done is
+   * exactly the one to go and review. Null when the workspace has no live agents: the
+   * row stays colourless, which is the whole point of reserving colour for "this one
+   * wants you".
    */
   function wsState(ws: Workspace): AgentState | null {
-    return app.rosterOf(ws.id)[0]?.state ?? null;
+    return app.workspaceStatus(ws.id)?.state ?? null;
   }
 
   function toggleSearch() {
@@ -250,53 +252,6 @@
     projLastIdx = idx;
     app.moveProjectToIndex(projDragId, idx);
   }
-  // Workspace drag-reorder, per project. The primary is not draggable — workspacesOf
-  // pins it to the top — so both the handle and the drop maths count BRANCHES only.
-  let wsDragId = $state<string | null>(null);
-  let wsDragMoved = $state(false);
-  let wsStartY = 0;
-  let wsLastIdx = -1;
-
-  function wsPointerDown(e: PointerEvent, ws: Workspace) {
-    suppressClick = false;
-    if (e.button !== 0 || editingWsId || q || ws.primary) return;
-    wsDragId = ws.id;
-    wsStartY = e.clientY;
-    wsDragMoved = false;
-    wsLastIdx = -1;
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  }
-  function wsPointerMove(e: PointerEvent) {
-    if (wsDragId === null) return;
-    if (!wsDragMoved && Math.abs(e.clientY - wsStartY) < 4) return;
-    wsDragMoved = true;
-    const owner = app.workspaces.find((w) => w.id === wsDragId);
-    if (!owner) return;
-    // Only this project's rows, and only the ones that can move.
-    const others = Array.from(
-      document.querySelectorAll<HTMLElement>(`.ws-list[data-project="${owner.projectId}"] .ws`),
-    ).filter((el) => el.dataset.id !== wsDragId && el.dataset.primary !== "true");
-    let idx = 0;
-    for (const el of others) {
-      const r = el.getBoundingClientRect();
-      if (e.clientY > r.top + r.height / 2) idx++;
-    }
-    if (idx === wsLastIdx) return;
-    wsLastIdx = idx;
-    app.moveWorkspaceToIndex(wsDragId, idx);
-  }
-  function wsPointerUp(e: PointerEvent) {
-    if (wsDragId === null) return;
-    try {
-      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-    } catch {
-      /* capture may already be gone */
-    }
-    if (wsDragMoved) suppressClick = true;
-    wsDragId = null;
-    wsDragMoved = false;
-  }
-
   function projPointerUp(e: PointerEvent) {
     if (projDragId === null) return;
     try {
@@ -314,12 +269,7 @@
    * you are already on folds it — standard tree behaviour, and it makes the twisty a
    * shortcut rather than the only way to collapse something.
    */
-  /** Select the workspace — unless the pointer was actually finishing a drag. */
   function wsClick(ws: Workspace) {
-    if (suppressClick) {
-      suppressClick = false;
-      return;
-    }
     if (editingWsId === ws.id) return;
     app.setActiveWorkspace(ws.id);
   }
@@ -653,7 +603,7 @@
           {#if open && !editing}
             <!-- The guide inherits the project's hue at 22%: enough to tie a run of
                  workspaces to its parent, far too quiet to read as decoration. -->
-            <ul class="ws-list" role="group" data-project={proj.id} style="--proj-hue:{proj.color}">
+            <ul class="ws-list" role="group" style="--proj-hue:{proj.color}">
               {#each spaces as ws (ws.id)}
                 {@const state = wsState(ws)}
                 {@const meta = state ? STATE_META[state] : null}
@@ -666,11 +616,7 @@
                     class="ws"
                     class:selected={isActive}
                     class:missing={wsMissing}
-                    class:draggable={!ws.primary}
-                    class:dragging={wsDragId === ws.id && wsDragMoved}
                     data-state={state ?? "none"}
-                    data-id={ws.id}
-                    data-primary={ws.primary ? "true" : "false"}
                     data-row
                     role="treeitem"
                     aria-selected={isActive}
@@ -680,10 +626,6 @@
                       : wsMissing
                         ? `Folder not found: ${ws.path}`
                         : `${ws.name} — ${stateText(state)}`}
-                    onpointerdown={(e) => wsPointerDown(e, ws)}
-                    onpointermove={wsPointerMove}
-                    onpointerup={wsPointerUp}
-                    onpointercancel={wsPointerUp}
                     onclick={() => wsClick(ws)}
                     ondblclick={() => startRenameWs(ws)}
                     onkeydown={(e) => wsKey(e, ws)}
@@ -1203,19 +1145,6 @@
        the status glyphs sit exactly under the project badges. */
     padding: 0 4px 0 30px;
     cursor: pointer;
-  }
-  /* Only a branch can be reordered; the primary is pinned, so it keeps the plain
-     pointer rather than advertising a drag that does nothing. */
-  .ws.draggable {
-    cursor: grab;
-    touch-action: none;
-  }
-  .ws.dragging {
-    cursor: grabbing;
-    background: var(--surface-4);
-    box-shadow: var(--shadow-md);
-    opacity: 0.95;
-    z-index: 2;
   }
   .ws-name {
     flex: 1;
