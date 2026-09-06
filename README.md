@@ -356,6 +356,8 @@ was cleared, that history is gone at the Claude CLI level (independent of Codesu
 
 Contributions, bug reports, and feature requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get set up and the conventions this project follows.
 
+If this project is useful to you, a star on GitHub helps others find it.
+
 ---
 
 ## License
