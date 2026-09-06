@@ -42,6 +42,8 @@
     // objects
     folder:
       "<path d='M4 6a2 2 0 0 1 2-2h3.2a2 2 0 0 1 1.4.6L12.2 6H18a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z'/>",
+    pullRequest:
+      "<circle cx='6' cy='6' r='2.5'/><circle cx='6' cy='18' r='2.5'/><circle cx='18' cy='18' r='2.5'/><path d='M6 8.5v7'/><path d='M18 15.5V11a3 3 0 0 0-3-3h-3'/><path d='M14.5 5.5 12 8l2.5 2.5'/>",
     branch:
       "<circle cx='6' cy='6' r='2.2'/><circle cx='6' cy='18' r='2.2'/><circle cx='18' cy='8' r='2.2'/><path d='M6 8.2v7.6'/><path d='M18 10.2a6 6 0 0 1-6 6H9'/>",
     alert:

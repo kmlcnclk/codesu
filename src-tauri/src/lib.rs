@@ -2,6 +2,7 @@ mod claude_home;
 mod editor;
 mod fsx;
 mod git;
+mod github;
 mod pty;
 mod runner;
 mod search;
@@ -78,6 +79,20 @@ fn create_worktree(
 #[tauri::command(async)]
 fn list_worktrees(repo: String) -> Result<Vec<Worktree>, String> {
     git::list_worktrees(&repo)
+}
+
+/// Pull requests for a workspace's branch, plus the repo's other open ones.
+#[tauri::command(async)]
+fn list_pull_requests(
+    repo: String,
+    branch: Option<String>,
+) -> Result<Vec<github::PullRequest>, String> {
+    github::list_pull_requests(&repo, branch)
+}
+
+#[tauri::command(async)]
+fn github_repo_url(repo: String) -> Result<String, String> {
+    github::repo_url(&repo)
 }
 
 #[tauri::command(async)]
@@ -400,6 +415,8 @@ pub fn run() {
             kill_pty,
             create_worktree,
             list_worktrees,
+            list_pull_requests,
+            github_repo_url,
             remove_worktree,
             is_git_repo,
             dir_exists,
