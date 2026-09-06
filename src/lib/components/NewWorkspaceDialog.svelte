@@ -1,6 +1,5 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { open } from "@tauri-apps/plugin-dialog";
   import Modal from "./Modal.svelte";
   import { app, type Workspace } from "$lib/store/app.svelte";
 
@@ -12,17 +11,15 @@
     is_main: boolean;
   }
 
-  interface DefaultProject {
-    path: string;
-    hasGit: boolean;
-  }
-
   let {
+    projectId,
     onClose,
     onCreated,
     heading = "New workspace",
     submitLabel = "Create workspace",
   }: {
+    /** The project the new workspace is created UNDER. */
+    projectId: string;
     onClose: () => void;
     /** Called with the freshly-created workspace before the dialog closes. */
     onCreated?: (ws: Workspace) => void;
@@ -30,64 +27,52 @@
     submitLabel?: string;
   } = $props();
 
-  let mode = $state<"folder" | "worktree">("folder");
+  const project = $derived(app.projects.find((p) => p.id === projectId));
 
-  // folder mode
-  let folder = $state("");
-  // worktree mode
-  let repo = $state("");
+  /**
+   * A workspace is a COPY of the project folder — a git worktree, made by the same
+   * `create_worktree` path Codesu has always used, checking the project out at
+   * `~/.codesu/worktrees/<repo>/<branch>` so parallel agents never fight over one
+   * checkout. There is no second way in: pointing a workspace at some unrelated folder
+   * would file it under a project it has nothing to do with, and a project that is not
+   * a git repo simply has nothing to branch from.
+   */
   let branch = $state("");
-  let baseRef = $state("");
-
   let busy = $state(false);
   let error = $state<string | null>(null);
-  let defaultProjects = $state<DefaultProject[]>([]);
-
-  async function loadDefaultProjects() {
-    const projects: DefaultProject[] = [];
-    for (const path of app.defaultProjects) {
-      try {
-        const hasGit = await invoke<boolean>("is_git_repo", { path });
-        projects.push({ path, hasGit });
-      } catch {
-        projects.push({ path, hasGit: false });
-      }
-    }
-    defaultProjects = projects;
-  }
-
-  $effect.pre(() => {
-    loadDefaultProjects();
-  });
-
-  async function pick(setter: (v: string) => void, title: string) {
-    const dir = await open({ directory: true, multiple: false, title });
-    if (typeof dir === "string") setter(dir);
-  }
 
   async function create() {
     error = null;
+    if (!project) {
+      error = "That project no longer exists.";
+      return;
+    }
+    if (!project.isGit) {
+      error = `${project.name} is not a git repository, so it has no branch to copy.`;
+      return;
+    }
+    const name = branch.trim();
+    if (!name) {
+      error = "Branch name is required.";
+      return;
+    }
     busy = true;
     try {
-      let ws: Workspace;
-      if (mode === "folder") {
-        if (!folder.trim()) throw new Error("Pick a folder.");
-        ws = app.addWorkspace({ path: folder.trim() });
-      } else {
-        if (!repo.trim() || !branch.trim()) throw new Error("Repository and branch are required.");
-        const wt = await invoke<Worktree>("create_worktree", {
-          repo: repo.trim(),
-          branch: branch.trim(),
-          baseRef: baseRef.trim() || null,
-        });
-        ws = app.addWorkspace({
-          name: branch.trim(),
-          path: wt.path,
-          repo: repo.trim(),
-          branch: branch.trim(),
-          isWorktree: true,
-        });
-      }
+      const wt = await invoke<Worktree>("create_worktree", {
+        repo: project.path,
+        branch: name,
+        // Always off the project's current HEAD — the branch you are on is what you
+        // want a scratch copy of, and asking every time bought nothing.
+        baseRef: null,
+      });
+      const ws = app.addWorkspace({
+        projectId: project.id,
+        name,
+        path: wt.path,
+        repo: project.path,
+        branch: name,
+        isWorktree: true,
+      });
       onCreated?.(ws);
       onClose();
     } catch (e) {
@@ -96,79 +81,50 @@
       busy = false;
     }
   }
+
+  /** Enter submits — the dialog has exactly one field, so a trip to the button is noise. */
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Enter" && !busy) {
+      e.preventDefault();
+      void create();
+    }
+  }
+
+  function focusOnMount(node: HTMLInputElement) {
+    node.focus();
+  }
 </script>
 
 <Modal title={heading} {onClose}>
   <div class="form">
-    <div class="seg">
-      <button class="seg-btn" class:on={mode === "folder"} onclick={() => (mode = "folder")}>Open folder</button>
-      <button class="seg-btn" class:on={mode === "worktree"} onclick={() => (mode = "worktree")}>Git worktree</button>
-    </div>
+    {#if project}
+      <div class="proj-tag" style="--accent:{project.color}">
+        <span class="d"></span>under <b>{project.name}</b>
+        <span class="path">{project.path}</span>
+      </div>
+    {/if}
 
-    {#if mode === "folder"}
-      {#if defaultProjects.length > 0}
-        <div class="field">
-          <span class="lbl">Default projects</span>
-          <div class="defaults">
-            {#each defaultProjects as proj (proj.path)}
-              <button
-                type="button"
-                class="default-btn"
-                title={proj.path}
-                onclick={() => {
-                  folder = proj.path;
-                  create();
-                }}
-              >
-                {proj.path.split("/").pop()}
-                {#if proj.hasGit}<span class="git-badge">git</span>{/if}
-              </button>
-            {/each}
-          </div>
-        </div>
-      {/if}
-      <label class="field">
-        <span class="lbl">Folder</span>
-        <div class="row">
-          <input class="input mono" bind:value={folder} placeholder="/path/to/project" spellcheck="false" />
-          <button type="button" class="pick" onclick={() => pick((v) => (folder = v), "Open folder")}>Browse…</button>
-        </div>
-      </label>
+    {#if project && !project.isGit}
+      <p class="hint">
+        <b>{project.name}</b> is not a git repository, so there is no branch to copy into a
+        workspace. Run <code>git init</code> in the folder and reopen this dialog.
+      </p>
     {:else}
-      {#if defaultProjects.filter((p) => p.hasGit).length > 0}
-        <div class="field">
-          <span class="lbl">Default git repos</span>
-          <div class="defaults">
-            {#each defaultProjects.filter((p) => p.hasGit) as proj (proj.path)}
-              <button
-                type="button"
-                class="default-btn"
-                title={proj.path}
-                onclick={() => {
-                  repo = proj.path;
-                  mode = "worktree";
-                }}
-              >
-                {proj.path.split("/").pop()}
-              </button>
-            {/each}
-          </div>
-        </div>
-      {/if}
+      <p class="hint">
+        Checks the project out into its own folder under <code>~/.codesu/worktrees</code>, off
+        the current HEAD, so agents here never touch the other workspaces' files.
+      </p>
       <label class="field">
-        <span class="lbl">Repository</span>
-        <div class="row">
-          <input class="input mono" bind:value={repo} placeholder="/path/to/repo" spellcheck="false" />
-          <button type="button" class="pick" onclick={() => pick((v) => (repo = v), "Select repository")}>Browse…</button>
-        </div>
-      </label>
-      <label class="field">
-        <span class="lbl">New branch</span>
-        <input class="input mono" bind:value={branch} placeholder="feat/my-task" spellcheck="false" />
-      </label>
-      <label class="field">
-        <span class="lbl">Base ref <em>(optional)</em></span>
-        <input class="input mono" bind:value={baseRef} placeholder="HEAD" spellcheck="false" />
+        <span class="lbl">Branch</span>
+        <input
+          class="input mono"
+          bind:value={branch}
+          use:focusOnMount
+          placeholder="feat/my-task"
+          spellcheck="false"
+          autocomplete="off"
+          onkeydown={onKey}
+        />
       </label>
     {/if}
 
@@ -176,7 +132,12 @@
 
     <div class="actions">
       <button type="button" class="btn ghost" onclick={onClose}>Cancel</button>
-      <button type="button" class="btn primary" disabled={busy} onclick={create}>
+      <button
+        type="button"
+        class="btn primary"
+        disabled={busy || !project?.isGit}
+        onclick={create}
+      >
         {busy ? "Working…" : submitLabel}
       </button>
     </div>
@@ -184,38 +145,48 @@
 </Modal>
 
 <style>
+  .hint {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-muted);
+  }
+  .hint code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .proj-tag {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .proj-tag .d {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex: none;
+  }
+  .proj-tag b {
+    color: var(--text-secondary);
+    font-weight: 600;
+  }
+  .proj-tag .path {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-ghost);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .form {
     display: flex;
     flex-direction: column;
     gap: 14px;
-  }
-  .seg {
-    display: flex;
-    gap: 4px;
-    padding: 4px;
-    background: var(--bg);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--r-md);
-  }
-  .seg-btn {
-    flex: 1;
-    padding: 7px;
-    border: none;
-    border-radius: var(--r-sm);
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 12.5px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background var(--t-fast), color var(--t-fast);
-  }
-  .seg-btn:hover {
-    color: var(--text);
-  }
-  .seg-btn.on {
-    background: var(--surface-4);
-    color: var(--text);
-    box-shadow: inset 0 0 0 1px var(--accent-softer);
   }
   .field {
     display: flex;
@@ -226,52 +197,6 @@
     font-size: 12px;
     font-weight: 600;
     color: var(--text-secondary);
-  }
-  .lbl em {
-    font-style: normal;
-    color: var(--text-muted);
-    font-weight: 400;
-  }
-  .defaults {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .default-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 12px;
-    border: 1px solid var(--border-strong);
-    background: var(--surface-2);
-    color: var(--text-secondary);
-    border-radius: var(--r-sm);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.13s, color 0.13s, border-color 0.13s;
-  }
-  .default-btn:hover {
-    background: var(--accent-soft);
-    color: var(--accent-bright);
-    border-color: var(--accent);
-  }
-  .git-badge {
-    display: inline-block;
-    padding: 2px 6px;
-    background: var(--surface-3);
-    color: var(--text-muted);
-    border-radius: 4px;
-    font-size: 10px;
-    font-weight: 600;
-    opacity: 0.7;
-  }
-  .row {
-    display: flex;
-    gap: 8px;
-  }
-  .row .input {
-    flex: 1;
   }
   .input {
     background: var(--bg);
@@ -294,22 +219,6 @@
   .mono {
     font-family: var(--font-mono);
     font-size: 12px;
-  }
-  .pick {
-    border: 1px solid var(--border-strong);
-    background: var(--surface-2);
-    color: var(--text-secondary);
-    border-radius: var(--r-sm);
-    padding: 0 12px;
-    font-size: 12px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: border-color var(--t-fast), color var(--t-fast), background var(--t-fast);
-  }
-  .pick:hover {
-    border-color: var(--accent-line);
-    color: var(--text);
-    background: var(--surface-3);
   }
   .error {
     margin: 0;

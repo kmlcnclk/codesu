@@ -4,6 +4,7 @@
   import Icon from "./Icon.svelte";
   import MarkdownEditor from "./MarkdownEditor.svelte";
   import NewWorkspaceDialog from "./NewWorkspaceDialog.svelte";
+  import NewProjectDialog from "./NewProjectDialog.svelte";
   import { stripMarkdown } from "$lib/markdown";
 
   let { onOpenAgent }: { onOpenAgent: (agentId: string) => void } = $props();
@@ -113,12 +114,27 @@
   }
   // Creating an agent opens the workspace picker; `useSelected` uses only the
   // highlighted text (spun off as its own task) instead of the whole note.
-  let agentDialog = $state<{ useSelected: boolean } | null>(null);
+  let agentDialog = $state<{ useSelected: boolean; projectId: string } | null>(null);
+  /**
+   * Set when "create agent" was clicked with no project to put it in: the project
+   * dialog opens first and hands us back the project, then the workspace dialog picks
+   * up where it left off. Without this the button was simply inert on a fresh install.
+   */
+  let pendingAgent = $state<{ useSelected: boolean } | null>(null);
 
   function startCreateAgent(useSelected: boolean) {
     if (!selected || selected.status !== "idea") return;
     if (useSelected && !selectedText.trim()) return;
-    agentDialog = { useSelected };
+    // A workspace is always created UNDER a project — the one you are in, or the first
+    // in the rail. `activeProjectId` is checked against the LIVE list because it can
+    // still name a project that has since been archived.
+    const active = app.liveProjects.find((p) => p.id === app.activeProjectId);
+    const projectId = (active ?? app.liveProjects[0])?.id;
+    if (!projectId) {
+      pendingAgent = { useSelected };
+      return;
+    }
+    agentDialog = { useSelected, projectId };
   }
 
   function onAgentWorkspace(ws: Workspace) {
@@ -365,8 +381,19 @@
   </div>
 </div>
 
+{#if pendingAgent}
+  <NewProjectDialog
+    onClose={() => (pendingAgent = null)}
+    onCreated={(project) => {
+      const cfg = pendingAgent;
+      pendingAgent = null;
+      if (cfg) agentDialog = { useSelected: cfg.useSelected, projectId: project.id };
+    }}
+  />
+{/if}
 {#if agentDialog}
   <NewWorkspaceDialog
+    projectId={agentDialog.projectId}
     heading="Create agent for note"
     submitLabel="Create workspace & agent"
     onCreated={onAgentWorkspace}

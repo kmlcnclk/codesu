@@ -298,8 +298,45 @@ export interface ClosedAgent {
   layout: LayoutNode | null;
 }
 
+/**
+ * A project is a FOLDER on disk — the top level of the sidebar tree, and the thing
+ * every workspace under it is a copy of.
+ *
+ * A project is not itself a place agents run: opening one means opening one of its
+ * workspaces. The project row exists so a repo you work on from several angles at
+ * once (a feature, a hotfix, a review) is ONE entry in the rail with its variants
+ * folded underneath, instead of N sibling rows that only their names relate.
+ */
+export interface Project {
+  id: string;
+  name: string;
+  /** Absolute path of the folder. For a git repo this is also the worktree parent. */
+  path: string;
+  color: string;
+  order: number;
+  archived: boolean;
+  /**
+   * Whether `path` is a git repo — decided once, when the project is added, and
+   * refreshed by {@link AppState.refreshProjectGit}. Workspaces can only be created
+   * as worktrees (the copy-the-folder flow) when this is true.
+   */
+  isGit: boolean;
+}
+
+/**
+ * A workspace is one working COPY of its project — in practice a git worktree at
+ * `~/.codesu/worktrees/<repo>/<branch>`, created by the same `create_worktree` path
+ * that has always backed worktree workspaces. Every project also has a `primary`
+ * workspace pointing straight at the project folder itself, so opening a project
+ * works before any branch has been made.
+ *
+ * Agents belong to a workspace and are reachable only from inside it (the tab bar);
+ * they are deliberately absent from the sidebar tree.
+ */
 export interface Workspace {
   id: string;
+  /** The project this workspace is a copy of. See {@link AppState.workspacesOf}. */
+  projectId: string;
   name: string;
   path: string;
   color: string;
@@ -309,6 +346,12 @@ export interface Workspace {
   repo: string | null;
   branch: string | null;
   isWorktree: boolean;
+  /**
+   * True for the workspace that IS the project folder (auto-created with the project).
+   * It has no worktree to remove and is never archived on its own — archiving it would
+   * leave a project you cannot open.
+   */
+  primary?: boolean;
 }
 
 /**
@@ -466,6 +509,8 @@ export function buildTaskPrompt(
 }
 
 class AppState {
+  /** Top level of the rail: the folders you work in. See {@link Project}. */
+  projects = $state<Project[]>([]);
   workspaces = $state<Workspace[]>([]);
   agents = $state<Agent[]>([]);
   tasks = $state<TaskItem[]>([]);
@@ -474,6 +519,8 @@ class AppState {
   /** Transient: a task the board should scroll to & flash (e.g. opened from a note). */
   focusTaskId = $state<string | null>(null);
   activeWorkspaceId = $state<string | null>(null);
+  /** The project whose row is selected in the rail (its workspaces are shown open). */
+  activeProjectId = $state<string | null>(null);
   /** Per-workspace active agent id (the FOCUSED pane — always a leaf of the active tab). */
   activeAgentByWs = $state<Record<string, string | null>>({});
   /** Per-workspace active tab id (a `groupId`). The tab whose split grid is on screen. */
@@ -512,11 +559,10 @@ class AppState {
   /** Width (px) of the left sidebar rail — user-resizable, persisted. */
   sidebarWidth = $state(268);
   /**
-   * Workspaces whose agent children are collapsed in the sidebar tree, by id.
-   * Absent / false means expanded — a new workspace shows its agents by default.
-   * Persisted so the tree looks the same after a restart.
+   * Projects whose workspace children are folded in the rail, by id. Absent/false
+   * means open — a newly added project shows its workspaces straight away.
    */
-  wsCollapsed = $state<Record<string, boolean>>({});
+  projCollapsed = $state<Record<string, boolean>>({});
   /** Width (px) of the Notes page's note-list pane — user-resizable, persisted. */
   notesListWidth = $state(296);
 
@@ -798,6 +844,63 @@ class AppState {
 
   // ---------- derived ----------
 
+  get liveProjects(): Project[] {
+    return this.projects
+      .filter((p) => !p.archived)
+      .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+  }
+  get archivedProjects(): Project[] {
+    return this.projects.filter((p) => p.archived);
+  }
+  get activeProject(): Project | undefined {
+    return this.projects.find((p) => p.id === this.activeProjectId);
+  }
+
+  /**
+   * The live workspaces of one project. The project's own folder (its `primary`) is
+   * pinned to the top — it is the workspace the project opens on, and a branch drifting
+   * above it would make the list read as if the branch were the project.
+   */
+  workspacesOf(projectId: string): Workspace[] {
+    return this.workspaces
+      .filter((w) => w.projectId === projectId && !w.archived)
+      .sort(
+        (a, b) =>
+          Number(!!b.primary) - Number(!!a.primary) ||
+          a.order - b.order ||
+          a.id.localeCompare(b.id),
+      );
+  }
+
+  /**
+   * Every live workspace in the order the RAIL shows them: project by project, each
+   * project's workspaces primary-first. `Workspace.order` is scoped to its project, so
+   * a flat `liveWorkspaces` sort interleaves projects and tie-breaks on uid — fine as a
+   * set, useless as "the next workspace to fall back to".
+   */
+  get railWorkspaces(): Workspace[] {
+    return this.liveProjects.flatMap((p) => this.workspacesOf(p.id));
+  }
+
+  /** The project a workspace belongs to (undefined for an orphan). */
+  projectOf(workspaceId: string): Project | undefined {
+    const ws = this.workspaces.find((w) => w.id === workspaceId);
+    return ws ? this.projects.find((p) => p.id === ws.projectId) : undefined;
+  }
+
+  /**
+   * Blocked / done agents anywhere under a project. Agents no longer appear in the
+   * rail, so without this roll-up a project could sit there silently while one of its
+   * workspaces waits on you — the one thing the tree must never hide.
+   */
+  projectAttentionCount(projectId: string): number {
+    return this.workspacesOf(projectId).reduce((n, w) => n + this.attentionCountOf(w.id), 0);
+  }
+  /** Agents actively producing output anywhere under a project. */
+  projectWorkingCount(projectId: string): number {
+    return this.workspacesOf(projectId).reduce((n, w) => n + this.workingCountOf(w.id), 0);
+  }
+
   get liveWorkspaces(): Workspace[] {
     // Tie-break on the stable id so colliding `order` values (which past releases
     // could produce) can never reshuffle across reloads — same idiom as boardTasks.
@@ -850,7 +953,17 @@ class AppState {
    * or restored outside the app is picked up without a restart.
    */
   async checkWorkspacePaths(): Promise<void> {
-    const paths = [...new Set(this.liveWorkspaces.map((w) => w.path).filter(Boolean))];
+    // Project folders as well as workspace folders: a project whose workspaces are all
+    // archived has no path in the workspace list, so its row could never go red — and
+    // the New workspace dialog would happily run `create_worktree` against a folder
+    // that is not there any more.
+    const paths = [
+      ...new Set(
+        [...this.liveWorkspaces.map((w) => w.path), ...this.liveProjects.map((p) => p.path)].filter(
+          Boolean,
+        ),
+      ),
+    ];
     const results = await Promise.all(
       paths.map(async (p) => {
         try {
@@ -1091,6 +1204,16 @@ class AppState {
         (a.state === "blocked" || a.state === "done"),
     ).length;
   }
+  /** Count of agents actively working in a workspace (drives the rail's live dot). */
+  workingCountOf(workspaceId: string): number {
+    return this.agents.filter(
+      (a) =>
+        a.workspaceId === workspaceId &&
+        !a.archived &&
+        this.effectiveLane(a) !== "done" &&
+        a.state === "working",
+    ).length;
+  }
   /**
    * Agents shown on the History page, newest-first: those marked Done, plus any
    * archived alongside their workspace (so an archived workspace's agents are still
@@ -1107,26 +1230,183 @@ class AppState {
 
   // ---------- mutations ----------
 
+  /**
+   * Add a project (a folder) and give it its `primary` workspace — the project folder
+   * itself — so it can be opened immediately, before any worktree exists.
+   *
+   * Re-adding a folder that is already a project selects the existing one instead of
+   * creating a duplicate row for the same directory.
+   */
+  addProject(input: { name?: string; path: string; isGit?: boolean }): {
+    project: Project;
+    /** False when the folder was already a project and this call merely selected it. */
+    created: boolean;
+  } {
+    // Trailing slashes are stripped so `/repo` and `/repo/` cannot become two projects
+    // for one folder — identical names in the rail, each with its own primary workspace.
+    const path = input.path.trim().replace(/\/+$/, "") || input.path.trim();
+    const existing = this.projects.find((p) => p.path === path);
+    if (existing) {
+      // The caller has just stat'd the folder, so its answer is fresher than ours.
+      if (input.isGit !== undefined) existing.isGit = input.isGit;
+      // Reviving the ROW alone would leave a project whose every workspace is still
+      // archived — openable in name only, with nothing under it to open. Re-adding a
+      // folder means "give me this project back", so it comes back whole.
+      if (existing.archived) this.unarchiveProject(existing.id);
+      else this.setActiveProject(existing.id);
+      this.persist();
+      return { project: existing, created: false };
+    }
+    const proj: Project = {
+      id: uid("proj"),
+      name: input.name?.trim() || basename(path),
+      path,
+      color: WORKSPACE_COLORS[this.projects.length % WORKSPACE_COLORS.length],
+      order: nextOrder(this.projects),
+      archived: false,
+      isGit: input.isGit ?? false,
+    };
+    this.projects.push(proj);
+    // Every project is openable from the moment it exists: its own folder is a
+    // workspace. Without this, a fresh project would be a row you cannot click into.
+    this.addWorkspace({
+      projectId: proj.id,
+      name: proj.name,
+      path: proj.path,
+      primary: true,
+    });
+    this.activeProjectId = proj.id;
+    this.persist();
+    return { project: proj, created: true };
+  }
+
+  renameProject(id: string, name: string) {
+    const p = this.projects.find((x) => x.id === id);
+    const next = name.trim();
+    if (!p || !next || p.name === next) return;
+    p.name = next;
+    this.persist();
+  }
+
+  /**
+   * Archive a project and everything under it. Its workspaces (and, through them, its
+   * agents) archive with it, so nothing is destroyed — History can restore the lot.
+   */
+  archiveProject(id: string) {
+    const proj = this.projects.find((p) => p.id === id);
+    if (!proj) return;
+    proj.archived = true;
+    for (const w of this.workspaces) {
+      if (w.projectId === id && !w.archived) this.archiveWorkspace(w.id);
+    }
+    // Whatever is selected must not live inside the project that just went away. The
+    // workspace is the thing that decides, not `activeProjectId`: archiveWorkspace may
+    // already have moved the selection somewhere perfectly good, and re-deciding on the
+    // project id alone used to yank the user out of a workspace in another project.
+    const active = this.workspaces.find((w) => w.id === this.activeWorkspaceId);
+    if (!active || active.archived || active.projectId === id) {
+      const next = this.railWorkspaces[0];
+      if (next) this.setActiveWorkspace(next.id);
+      else {
+        this.activeWorkspaceId = null;
+        this.activeProjectId = this.liveProjects[0]?.id ?? null;
+      }
+    }
+    this.persist();
+  }
+
+  unarchiveProject(id: string) {
+    const proj = this.projects.find((p) => p.id === id);
+    if (!proj) return;
+    proj.archived = false;
+    proj.order = nextOrder(this.projects.filter((p) => !p.archived && p.id !== id));
+    for (const w of this.workspaces) {
+      if (w.projectId === id && w.archived) this.unarchiveWorkspace(w.id);
+    }
+    // Each unarchiveWorkspace selects the workspace it restored, so without this the
+    // project reopens on whichever child happened to come last. setActiveProject would
+    // keep that (it only fills an EMPTY selection), so the target is named outright.
+    const list = this.workspacesOf(id);
+    const target = list.find((w) => w.primary) ?? list[0];
+    if (target) this.setActiveWorkspace(target.id);
+    else this.activeProjectId = id;
+    this.persist();
+  }
+
+  /**
+   * Select a project. Selecting one also opens a workspace inside it — the one you
+   * were last in if it is still there, otherwise its primary — because a project row
+   * is a container, and the panes on the right always show a workspace.
+   */
+  setActiveProject(id: string) {
+    this.activeProjectId = id;
+    const list = this.workspacesOf(id);
+    if (!list.length) return;
+    const current = this.activeWorkspaceId;
+    if (current && list.some((w) => w.id === current)) return;
+    const target = list.find((w) => w.primary) ?? list[0];
+    this.setActiveWorkspace(target.id);
+  }
+
+  toggleProjectCollapsed(id: string) {
+    this.projCollapsed[id] = !this.projCollapsed[id];
+    this.persist();
+  }
+  expandProject(id: string) {
+    if (!this.projCollapsed[id]) return;
+    this.projCollapsed[id] = false;
+    this.persist();
+  }
+  setAllProjectsCollapsed(collapsed: boolean) {
+    for (const p of this.liveProjects) this.projCollapsed[p.id] = collapsed;
+    this.persist();
+  }
+
+  /**
+   * Move a project to an absolute slot among the other live projects (0-based,
+   * measured with the dragged item removed). Idempotent — safe per pointer frame.
+   */
+  moveProjectToIndex(draggedId: string, index: number) {
+    const list = this.liveProjects;
+    const from = list.findIndex((p) => p.id === draggedId);
+    if (from === -1) return;
+    const [moved] = list.splice(from, 1);
+    const at = Math.max(0, Math.min(index, list.length));
+    list.splice(at, 0, moved);
+    list.forEach((p, i) => (p.order = i));
+    this.persist();
+  }
+
   addWorkspace(input: {
+    projectId: string;
     name?: string;
     path: string;
     repo?: string | null;
     branch?: string | null;
     isWorktree?: boolean;
+    primary?: boolean;
   }): Workspace {
+    const project = this.projects.find((p) => p.id === input.projectId);
     const ws: Workspace = {
       id: uid("ws"),
+      projectId: input.projectId,
       name: input.name?.trim() || basename(input.path),
       path: input.path,
-      color: WORKSPACE_COLORS[this.workspaces.length % WORKSPACE_COLORS.length],
-      order: nextOrder(this.workspaces),
+      // A workspace wears its PROJECT's hue: the colour is the project's identity in
+      // the rail, and giving each workspace its own would make one folder read as
+      // several unrelated things. Orphans (no project) fall back to the palette.
+      color:
+        project?.color ?? WORKSPACE_COLORS[this.workspaces.length % WORKSPACE_COLORS.length],
+      order: nextOrder(this.workspaces.filter((w) => w.projectId === input.projectId)),
       archived: false,
       repo: input.repo ?? null,
       branch: input.branch ?? null,
       isWorktree: input.isWorktree ?? false,
+      primary: input.primary ?? false,
     };
     this.workspaces.push(ws);
     this.activeWorkspaceId = ws.id;
+    if (project) this.activeProjectId = project.id;
     this.persist();
     return ws;
   }
@@ -1148,7 +1428,16 @@ class AppState {
       this.launchedAgentIds.delete(a.id);
     }
     if (this.activeWorkspaceId === id) {
-      this.activeWorkspaceId = this.liveWorkspaces[0]?.id ?? null;
+      // Fall to a sibling in the same project before leaving the project entirely —
+      // archiving one branch should not throw you into a different repo. Failing that,
+      // the next workspace in RAIL order, so you land where the tree says you should.
+      const sibling = this.workspacesOf(ws.projectId).find((w) => w.id !== id);
+      const next = sibling ?? this.railWorkspaces.find((w) => w.id !== id);
+      if (next) this.setActiveWorkspace(next.id);
+      else {
+        this.activeWorkspaceId = null;
+        this.activeProjectId = this.liveProjects[0]?.id ?? null;
+      }
     }
     this.persist();
   }
@@ -1157,11 +1446,33 @@ class AppState {
     const ws = this.workspaces.find((w) => w.id === id);
     if (!ws) return;
     ws.archived = false;
+    // Restoring a workspace has to restore the row it hangs off, or it would come back
+    // into a tree that cannot show it. Its SIBLINGS stay archived — that is what
+    // "restore this one" means — with one exception below.
+    const owner = this.projects.find((p) => p.id === ws.projectId);
+    if (owner?.archived) {
+      owner.archived = false;
+      owner.order = nextOrder(this.projects.filter((p) => !p.archived && p.id !== owner.id));
+      // The exception: the project's PRIMARY comes back with it. A live project whose
+      // primary is archived is a broken shape — the load-time migration cannot see the
+      // archived row, so it would mint a second primary for the same folder on every
+      // launch, and neither copy can be archived from the rail. Reviving it here is what
+      // keeps that state from ever existing.
+      const primary = this.workspaces.find(
+        (w) => w.projectId === owner.id && w.primary && w.archived && w.id !== id,
+      );
+      if (primary) this.unarchiveWorkspace(primary.id);
+    }
     // Give it a fresh slot at the end of the live list so its stale `order` can't
     // collide with a workspace that took that slot while it was archived.
-    ws.order = nextOrder(this.workspaces.filter((w) => !w.archived && w.id !== id));
+    ws.order = nextOrder(
+      this.workspaces.filter((w) => !w.archived && w.projectId === ws.projectId && w.id !== id),
+    );
     for (const a of this.agents) if (a.workspaceId === id) a.archived = false;
-    this.activeWorkspaceId = id;
+    // Through setActiveWorkspace, not by hand: it is what keeps `activeProjectId` in
+    // step with the workspace (and syncs the active tab/pane). Assigning the id
+    // directly left the titlebar naming one project while the panes showed another.
+    this.setActiveWorkspace(id);
     // The restored panes remount UNLAUNCHED (archiveWorkspace cleared their ids from
     // launchedAgentIds), so each shows the "Resume" placeholder instead of silently
     // resuming its Claude session.
@@ -1170,6 +1481,10 @@ class AppState {
 
   setActiveWorkspace(id: string) {
     this.activeWorkspaceId = id;
+    // Selection flows UP the tree too: opening a workspace selects its project, so the
+    // rail never shows an open workspace under an unselected parent.
+    const owner = this.workspaces.find((w) => w.id === id);
+    if (owner) this.activeProjectId = owner.projectId;
     if (!this.activeAgentByWs[id]) {
       this.activeAgentByWs[id] = this.tabsOf(id)[0]?.id ?? null;
     }
@@ -1187,14 +1502,18 @@ class AppState {
     this.persist();
   }
 
+  /** Drop `draggedId` onto `targetId`'s slot. See {@link moveWorkspaceToIndex} for why
+   * the primary is excluded and the keys start at 1. */
   reorderWorkspaces(draggedId: string, targetId: string) {
-    const list = this.liveWorkspaces;
+    const owner = this.workspaces.find((w) => w.id === draggedId);
+    if (!owner || owner.primary) return;
+    const list = this.workspacesOf(owner.projectId).filter((w) => !w.primary);
     const from = list.findIndex((w) => w.id === draggedId);
     const to = list.findIndex((w) => w.id === targetId);
     if (from === -1 || to === -1 || from === to) return;
     const [moved] = list.splice(from, 1);
     list.splice(to, 0, moved);
-    list.forEach((w, i) => (w.order = i));
+    list.forEach((w, i) => (w.order = i + 1));
     this.persist();
   }
 
@@ -1204,13 +1523,20 @@ class AppState {
    * pointer-move frame during a drag.
    */
   moveWorkspaceToIndex(draggedId: string, index: number) {
-    const list = this.liveWorkspaces;
+    // Ordering is per project — a workspace can only be dragged among its siblings. The
+    // primary is excluded from the list entirely: workspacesOf pins it to the top no
+    // matter what `order` says, so including it would make a drop into slot 0 a silent
+    // no-op and leave one slot unreachable. `index` is therefore counted among the
+    // BRANCHES, and their keys start at 1 so the primary's 0 always sorts first.
+    const owner = this.workspaces.find((w) => w.id === draggedId);
+    if (!owner || owner.primary) return;
+    const list = this.workspacesOf(owner.projectId).filter((w) => !w.primary);
     const from = list.findIndex((w) => w.id === draggedId);
     if (from === -1) return;
     const [moved] = list.splice(from, 1);
     const at = Math.max(0, Math.min(index, list.length));
     list.splice(at, 0, moved);
-    list.forEach((w, i) => (w.order = i));
+    list.forEach((w, i) => (w.order = i + 1));
     this.persist();
   }
 
@@ -2213,6 +2539,7 @@ class AppState {
       if (!read) continue;
 
       const rec = this.rec(a.id);
+
       // Read only when there is something to read: the screen has changed since the last
       // reading, or a reading is still waiting to settle. Deliberately NOT "output
       // arrived in the last N seconds" — a hidden or minimised window has its timers
@@ -2336,28 +2663,6 @@ class AppState {
     this.persist();
   }
 
-  /** Expanded ⇄ collapsed for one workspace's agent children in the sidebar tree. */
-  toggleWorkspaceCollapsed(id: string) {
-    this.wsCollapsed[id] = !this.wsCollapsed[id];
-    this.persist();
-  }
-  /** Force one workspace's agent children open (used when its row is selected). */
-  expandWorkspace(id: string) {
-    if (!this.wsCollapsed[id]) return;
-    this.wsCollapsed[id] = false;
-    this.persist();
-  }
-  /**
-   * Fold / unfold the whole tree in one write — a per-workspace loop would persist
-   * once per row.
-   */
-  setAllWorkspacesCollapsed(collapsed: boolean) {
-    const next: Record<string, boolean> = {};
-    if (collapsed) for (const w of this.liveWorkspaces) next[w.id] = true;
-    this.wsCollapsed = next;
-    this.persist();
-  }
-
   /** Clamp + persist the Notes page's note-list pane width. */
   setNotesListWidth(px: number) {
     this.notesListWidth = Math.max(200, Math.min(560, Math.round(px)));
@@ -2426,9 +2731,138 @@ class AppState {
     return out;
   }
 
+  /**
+   * Rebuild the project tree for any workspace that predates it (or was orphaned by a
+   * project row going missing). Idempotent and safe to run on every load: a workspace
+   * that already has a live `projectId` is left completely alone.
+   *
+   * Grouping key is the WORKTREE PARENT where there is one — every worktree of a repo
+   * belongs under one project for that repo — and the workspace's own folder otherwise.
+   */
+  private migrateWorkspacesIntoProjects() {
+    const byPath = new Map(this.projects.map((p) => [p.path, p] as const));
+    const known = new Set(this.projects.map((p) => p.id));
+    /** Projects this pass invented — the only ones it may decide the archived flag for. */
+    const created = new Set<string>();
+    let touched = false;
+
+    const projectFor = (path: string, isGit: boolean): Project => {
+      const hit = byPath.get(path);
+      if (hit) {
+        // A repo-derived key proves git-ness even if the row was created without it.
+        if (isGit && !hit.isGit) hit.isGit = true;
+        return hit;
+      }
+      const proj: Project = {
+        id: uid("proj"),
+        name: basename(path),
+        path,
+        color: WORKSPACE_COLORS[this.projects.length % WORKSPACE_COLORS.length],
+        order: nextOrder(this.projects),
+        archived: false,
+        isGit,
+      };
+      this.projects.push(proj);
+      byPath.set(path, proj);
+      known.add(proj.id);
+      created.add(proj.id);
+      touched = true;
+      return proj;
+    };
+
+    for (const ws of this.workspaces) {
+      if (ws.projectId && known.has(ws.projectId)) continue;
+      const repo = ws.isWorktree && ws.repo ? ws.repo : null;
+      const proj = projectFor(repo ?? ws.path, !!repo);
+      ws.projectId = proj.id;
+      ws.color = proj.color;
+      // The row that IS the project folder becomes its primary workspace.
+      if (!ws.isWorktree && ws.path === proj.path) ws.primary = true;
+      touched = true;
+    }
+
+    // Archived-ness is decided AFTER every workspace has been filed, never while the
+    // list is half-assigned: a project whose first workspace happened to be archived
+    // would otherwise stay archived even once a live one landed under it — a live
+    // workspace hanging off an invisible parent, which the rail cannot show at all.
+    for (const id of created) {
+      const proj = this.projects.find((p) => p.id === id)!;
+      const mine = this.workspaces.filter((w) => w.projectId === id);
+      proj.archived = mine.length > 0 && mine.every((w) => w.archived);
+    }
+
+    // Every live project needs a workspace for its own folder — a repo whose only rows
+    // were worktrees would otherwise have no way back to the main checkout.
+    for (const proj of this.projects) {
+      if (proj.archived) continue;
+      const list = this.workspacesOf(proj.id);
+      if (list.some((w) => w.primary || w.path === proj.path)) {
+        for (const w of list) if (w.path === proj.path) w.primary = true;
+        continue;
+      }
+      // Look past the live rows before minting anything. An ARCHIVED primary is still
+      // this project's folder-workspace: creating a second one beside it would leave two
+      // rows for one directory, neither of which the rail lets you archive. Restore the
+      // one that exists instead.
+      const archivedPrimary = this.workspaces.find(
+        (w) => w.projectId === proj.id && w.archived && (w.primary || w.path === proj.path),
+      );
+      if (archivedPrimary) {
+        archivedPrimary.primary = true;
+        archivedPrimary.archived = false;
+        for (const a of this.agents) if (a.workspaceId === archivedPrimary.id) a.archived = false;
+        touched = true;
+        continue;
+      }
+      this.workspaces.push({
+        id: uid("ws"),
+        projectId: proj.id,
+        name: proj.name,
+        path: proj.path,
+        color: proj.color,
+        order: 0, // pinned above its branches by workspacesOf's `primary` rule
+        archived: false,
+        repo: null,
+        branch: null,
+        isWorktree: false,
+        primary: true,
+      });
+      touched = true;
+    }
+
+    if (touched) {
+      // Compact the ordering keys the migration just perturbed, so the tree is stable
+      // from the first render rather than after the first drag.
+      this.liveProjects.forEach((p, i) => (p.order = i));
+      for (const proj of this.projects) {
+        this.workspacesOf(proj.id).forEach((w, i) => (w.order = i));
+      }
+    }
+  }
+
+  /**
+   * Re-check each live project's folder for a `.git`, so the New workspace dialog
+   * knows whether the worktree flow is available. Cheap, and safe to re-run.
+   */
+  async refreshProjectGit(): Promise<void> {
+    await Promise.all(
+      this.liveProjects.map(async (p) => {
+        if (!p.path) return;
+        try {
+          const isGit = await invoke<boolean>("is_git_repo", { path: p.path });
+          if (p.isGit !== isGit) p.isGit = isGit;
+        } catch {
+          /* leave the last known answer in place */
+        }
+      }),
+    );
+    this.persist();
+  }
+
   private snapshot() {
     return {
       version: 1,
+      projects: this.projects,
       workspaces: this.workspaces,
       agents: this.agents.map((a) => ({
         id: a.id,
@@ -2459,6 +2893,7 @@ class AppState {
       tasks: this.tasks,
       activityLog: this.activityLog,
       activeWorkspaceId: this.activeWorkspaceId,
+      activeProjectId: this.activeProjectId,
       activeAgentByWs: this.activeAgentByWs,
       activeTabByWs: this.activeTabByWs,
       tabLayouts: this.liveTabLayouts(),
@@ -2471,7 +2906,7 @@ class AppState {
       lastNoteId: this.lastNoteId,
       lastClosed: this.lastClosed,
       sidebarWidth: this.sidebarWidth,
-      wsCollapsed: this.wsCollapsed,
+      projCollapsed: this.projCollapsed,
       notesListWidth: this.notesListWidth,
       codeOpenByWs: this.codeOpenByWs,
       codeTreeWidth: this.codeTreeWidth,
@@ -2519,6 +2954,13 @@ class AppState {
       const data = await invoke<any>("load_state");
       if (data && Array.isArray(data.workspaces)) {
         this.workspaces = data.workspaces;
+        this.projects = Array.isArray(data.projects) ? data.projects : [];
+        // Pre-project state files have a FLAT workspace list. Rebuild the tree from
+        // what those rows already know about themselves rather than asking the user to
+        // re-add anything: worktree workspaces name their parent repo, so they gather
+        // under one project for it, and a plain folder workspace becomes a project of
+        // its own with that same row as its primary workspace.
+        this.migrateWorkspacesIntoProjects();
         const archivedWs = new Set(
           this.workspaces.filter((w) => w.archived).map((w) => w.id),
         );
@@ -2636,7 +3078,14 @@ class AppState {
               }))
           : [];
         this.activeWorkspaceId =
-          data.activeWorkspaceId ?? this.liveWorkspaces[0]?.id ?? null;
+          data.activeWorkspaceId ?? this.railWorkspaces[0]?.id ?? null;
+        const activeWs = this.workspaces.find((w) => w.id === this.activeWorkspaceId);
+        const savedProj = activeWs?.projectId ?? data.activeProjectId;
+        // Validated, not trusted: a saved id can name a project that has since been
+        // archived, and an archived project is not in the tree — everything keyed off
+        // it (the titlebar, "new workspace goes here") would point at an invisible row.
+        const liveProj = this.projects.find((p) => p.id === savedProj && !p.archived);
+        this.activeProjectId = liveProj?.id ?? this.liveProjects[0]?.id ?? null;
         this.activeAgentByWs = data.activeAgentByWs ?? {};
         this.activeTabByWs = data.activeTabByWs ?? {};
         // Restore per-tab split layouts, dropping any that reference an agent that
@@ -2688,8 +3137,8 @@ class AppState {
         // Load persisted layout sizes (with sane clamps).
         if (typeof data.sidebarWidth === "number")
           this.sidebarWidth = Math.max(180, Math.min(560, data.sidebarWidth));
-        if (data.wsCollapsed && typeof data.wsCollapsed === "object")
-          this.wsCollapsed = { ...data.wsCollapsed };
+        if (data.projCollapsed && typeof data.projCollapsed === "object")
+          this.projCollapsed = { ...data.projCollapsed };
         if (typeof data.notesListWidth === "number")
           this.notesListWidth = Math.max(200, Math.min(560, data.notesListWidth));
         // Code view: only the open-file PATHS are restored — each buffer is re-read from
@@ -2774,6 +3223,10 @@ class AppState {
     // Flag workspaces whose folder has disappeared, so the sidebar says so instead of
     // the user finding out when an agent refuses to start. Non-blocking.
     void this.checkWorkspacePaths();
+    // Resolve each project's git-ness. Migrated projects only know they are repos when
+    // a worktree pointed at them, so a plain folder project would otherwise be offered
+    // no way to branch until the window happened to regain focus.
+    void this.refreshProjectGit();
     // Each Claude agent owns an isolated Claude config dir (that's what keeps its typed
     // prompts out of its siblings' ↑ history — see TerminalPane.resolveEnv). Closing an
     // agent leaves its directory behind, so the ones with no agent left are dropped here,

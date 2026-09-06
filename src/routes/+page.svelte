@@ -14,6 +14,7 @@
   import ReviewPage from "$lib/components/ReviewPage.svelte";
   import NewAgentDialog from "$lib/components/NewAgentDialog.svelte";
   import NewWorkspaceDialog from "$lib/components/NewWorkspaceDialog.svelte";
+  import NewProjectDialog from "$lib/components/NewProjectDialog.svelte";
   import TasksPage from "$lib/components/TasksPage.svelte";
   import HistoryPage from "$lib/components/HistoryPage.svelte";
   import NotesPage from "$lib/components/NotesPage.svelte";
@@ -75,8 +76,19 @@
     { view: "settings", label: "Settings", icon: "settings", hue: "--hue-rose", title: "Settings (⌘S)" },
   ];
 
-  let showNewWorkspace = $state(false);
+  let showNewProject = $state(false);
+  /** The project a new workspace is being created under, or null when the dialog is shut. */
+  let newWorkspaceProj = $state<string | null>(null);
   let newAgentWs = $state<string | null>(null);
+
+  /**
+   * "Add a workspace" from anywhere that isn't a project row: it goes under the active
+   * project, and with no project yet the only sensible first step is to add one.
+   */
+  function newWorkspaceForActive() {
+    if (app.activeProjectId) newWorkspaceProj = app.activeProjectId;
+    else showNewProject = true;
+  }
   let muted = $state(false);
   // macOS hides the native traffic-light buttons in fullscreen; track it so the
   // titlebar's left inset (which reserves room for those buttons) can collapse and
@@ -155,6 +167,9 @@
   // for both add and remove.
   function recheckPaths() {
     void app.checkWorkspacePaths();
+    // A folder can become (or stop being) a repo while the app is open — `git init`,
+    // a clone finishing — and that decides whether it can spawn worktree workspaces.
+    void app.refreshProjectGit();
   }
 
   /**
@@ -223,13 +238,13 @@
       // Agents-only actions
       else if (shortcut.action === "new-claude-agent") {
         if (app.activeWorkspaceId) app.newClaudeInActive();
-        else showNewWorkspace = true;
+        else newWorkspaceForActive();
       } else if (shortcut.action === "split-pane-vertical") {
         if (app.activeWorkspaceId) app.splitFocused("row");
-        else showNewWorkspace = true;
+        else newWorkspaceForActive();
       } else if (shortcut.action === "split-pane-horizontal") {
         if (app.activeWorkspaceId) app.splitFocused("col");
-        else showNewWorkspace = true;
+        else newWorkspaceForActive();
       } else if (shortcut.action === "flip-split") {
         if (app.activeAgent) app.flipSplitOf(app.activeAgent.id);
       } else if (shortcut.action === "close-current-agent") {
@@ -264,16 +279,28 @@
    */
   function showWorkspaceMenu(e: MouseEvent) {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const items: MenuItem[] = app.liveWorkspaces.map((w) => ({
-      label: w.name,
-      color: w.color,
-      checked: w.id === app.activeWorkspaceId,
-      onSelect: () => app.setActiveWorkspace(w.id),
-    }));
+    // Grouped by project, in the rail's own order: workspace names ("main", "fix/…")
+    // repeat across projects, so a flat list of them cannot be navigated.
+    const items: MenuItem[] = [];
+    for (const proj of app.liveProjects) {
+      const spaces = app.workspacesOf(proj.id);
+      if (!spaces.length) continue;
+      let first = true;
+      for (const w of spaces) {
+        items.push({
+          label: first ? `${proj.name} / ${w.name}` : `    ${w.name}`,
+          color: w.color,
+          checked: w.id === app.activeWorkspaceId,
+          separatorBefore: first && items.length > 0,
+          onSelect: () => app.setActiveWorkspace(w.id),
+        });
+        first = false;
+      }
+    }
     items.push({
       label: "New workspace…",
       separatorBefore: true,
-      onSelect: () => (showNewWorkspace = true),
+      onSelect: newWorkspaceForActive,
     });
     popupMenu = { x: Math.min(r.left, window.innerWidth - 240), y: r.bottom + 4, items };
   }
@@ -408,7 +435,7 @@
   }
   function newAgentForActive() {
     if (app.activeWorkspaceId) newAgentWs = app.activeWorkspaceId;
-    else showNewWorkspace = true;
+    else newWorkspaceForActive();
   }
 </script>
 
@@ -461,6 +488,10 @@
       onclick={toggleMute}
     ><Icon name={muted ? "volumeMute" : "volume"} size={15} /></button>
     {#if (view === "agents" || view === "code" || view === "review") && app.activeWorkspace}
+      <!-- Derived from the WORKSPACE, never from activeProjectId: two independent ids
+           can drift apart, and a chip naming one project while the panes show another
+           is worse than no chip at all. -->
+      {@const crumbProj = app.projectOf(app.activeWorkspace.id)}
       <span class="crumbs">
         <button
           class="ws-chip"
@@ -468,7 +499,10 @@
           title="Switch workspace"
           onclick={showWorkspaceMenu}
         >
-          <span class="d"></span>{app.activeWorkspace.name}
+          <!-- Project first, then the workspace inside it: workspace names repeat
+               across projects ("main", "fix/…"), so the name alone does not locate you. -->
+          <span class="d"></span>{#if crumbProj}<span class="proj">{crumbProj.name}</span
+            ><span class="sep">/</span>{/if}{app.activeWorkspace.name}
           <Icon name="chevronDown" size={12} />
         </button>
         {#if view === "agents" && app.activeAgent}<span class="arrow">›</span><span class="ag"
@@ -526,7 +560,8 @@
     -->
     {#if view === "agents"}
       <Sidebar
-        onNewWorkspace={() => (showNewWorkspace = true)}
+        onNewProject={() => (showNewProject = true)}
+        onNewWorkspace={(projectId) => (newWorkspaceProj = projectId)}
         onNewAgent={openNewAgent}
         onOpenCode={openCodeFromSidebar}
       />
@@ -579,9 +614,24 @@
   </div>
 </div>
 
-{#if showNewWorkspace}
+{#if showNewProject}
+  <NewProjectDialog
+    onClose={() => (showNewProject = false)}
+    onCreated={(project, created) => {
+      // A brand-new project opens on its own folder with one agent ready to talk to,
+      // rather than on an empty pane the user has to furnish first. Only a REAL create:
+      // re-picking a folder you already track just selects it, and seeding an agent
+      // there would spawn an unasked-for Claude (and its PTY) in an open workspace.
+      if (!created) return;
+      const primary = app.workspacesOf(project.id)[0];
+      if (primary) app.addAgent({ workspaceId: primary.id, kind: "claude", run: "claude" });
+    }}
+  />
+{/if}
+{#if newWorkspaceProj}
   <NewWorkspaceDialog
-    onClose={() => (showNewWorkspace = false)}
+    projectId={newWorkspaceProj}
+    onClose={() => (newWorkspaceProj = null)}
     onCreated={(ws) => {
       app.addAgent({
         workspaceId: ws.id,
@@ -808,6 +858,15 @@
     border-radius: 50%;
     background: var(--accent);
     flex-shrink: 0;
+  }
+  /* The project is the context, the workspace is the subject: the project name is
+     dimmed so the eye lands on which workspace you are in. */
+  .ws-chip .proj {
+    color: var(--text-muted);
+  }
+  .ws-chip .sep {
+    color: var(--text-ghost);
+    margin: 0 3px;
   }
   .arrow {
     color: var(--text-ghost);
