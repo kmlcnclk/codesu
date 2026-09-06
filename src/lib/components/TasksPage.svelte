@@ -154,11 +154,14 @@
     return grouped;
   });
 
-  // Cache workspace lookups
+  // Cache workspace lookups. The label carries the PROJECT too: workspace names
+  // repeat across projects ("main", "test", a shared branch name), so the workspace
+  // name on its own no longer says where a task's work actually lives.
   const workspaceMap = $derived.by(() => {
-    const map = new Map();
+    const map = new Map<string, string>();
     for (const ws of app.workspaces) {
-      map.set(ws.id, ws.name);
+      const proj = app.projects.find((p) => p.id === ws.projectId);
+      map.set(ws.id, proj && proj.name !== ws.name ? `${proj.name} / ${ws.name}` : ws.name);
     }
     return map;
   });

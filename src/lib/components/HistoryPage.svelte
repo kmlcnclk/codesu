@@ -56,7 +56,11 @@
     onOpenAgent(agent.id);
   }
 
-  const empty = $derived(app.historyAgents.length === 0 && app.archivedWorkspaces.length === 0);
+  const empty = $derived(
+    app.historyAgents.length === 0 &&
+      app.archivedWorkspaces.length === 0 &&
+      app.archivedProjects.length === 0,
+  );
 </script>
 
 <div class="page">
@@ -154,6 +158,35 @@
                 </ul>
               </div>
             {/each}
+          </section>
+        {/if}
+
+        {#if app.archivedProjects.length > 0}
+          <section>
+            <h2 class="section-title">
+              <Icon name="folder" size={13} /> Archived projects
+              <span class="c">{app.archivedProjects.length}</span>
+            </h2>
+            <ul class="rows">
+              {#each app.archivedProjects as proj (proj.id)}
+                <li class="row" style="--accent:{proj.color}">
+                  <span class="avatar"><Icon name="folder" size={17} /></span>
+                  <div class="info">
+                    <div class="line1">
+                      <span class="name">{proj.name}</span>
+                      <span class="tag">{proj.isGit ? "Git repo" : "Folder"}</span>
+                    </div>
+                    <div class="line2 mono">{proj.path}</div>
+                  </div>
+                  <div class="acts">
+                    <!-- Restores the project and everything that was archived with it. -->
+                    <button class="btn ghost sm" onclick={() => app.unarchiveProject(proj.id)}>
+                      <Icon name="restore" size={13} /> Restore
+                    </button>
+                  </div>
+                </li>
+              {/each}
+            </ul>
           </section>
         {/if}
 

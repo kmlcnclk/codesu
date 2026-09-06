@@ -61,10 +61,14 @@
 <div class="area" bind:this={areaEl}>
   {#if app.mountedAgents.length === 0}
     <div class="empty">
-      {#if app.liveWorkspaces.length === 0}
+      {#if app.liveProjects.length === 0}
+        <div class="glyph"><Icon name="folder" size={34} stroke={1.4} /></div>
+        <h2>No projects yet</h2>
+        <p>Add a project folder from the left, then create workspaces inside it.</p>
+      {:else if app.liveWorkspaces.length === 0}
         <div class="glyph"><Icon name="folder" size={34} stroke={1.4} /></div>
         <h2>No workspaces yet</h2>
-        <p>Create a workspace from the left to start running agents.</p>
+        <p>Create a workspace under a project to start running agents.</p>
       {:else}
         <div class="glyph"><Icon name="terminal" size={34} stroke={1.4} /></div>
         <h2>No agents in this workspace</h2>

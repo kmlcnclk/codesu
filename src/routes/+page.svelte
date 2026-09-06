@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { app } from "$lib/store/app.svelte";
@@ -14,6 +14,7 @@
   import ReviewPage from "$lib/components/ReviewPage.svelte";
   import NewAgentDialog from "$lib/components/NewAgentDialog.svelte";
   import NewWorkspaceDialog from "$lib/components/NewWorkspaceDialog.svelte";
+  import NewProjectDialog from "$lib/components/NewProjectDialog.svelte";
   import TasksPage from "$lib/components/TasksPage.svelte";
   import HistoryPage from "$lib/components/HistoryPage.svelte";
   import NotesPage from "$lib/components/NotesPage.svelte";
@@ -22,6 +23,8 @@
   import SystemTerminalView from "$lib/components/SystemTerminalView.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import { setMuted, installAudioUnlock } from "$lib/sound";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { invoke } from "@tauri-apps/api/core";
 
   type View =
     | "agents"
@@ -75,8 +78,19 @@
     { view: "settings", label: "Settings", icon: "settings", hue: "--hue-rose", title: "Settings (⌘S)" },
   ];
 
-  let showNewWorkspace = $state(false);
+  let showNewProject = $state(false);
+  /** The project a new workspace is being created under, or null when the dialog is shut. */
+  let newWorkspaceProj = $state<string | null>(null);
   let newAgentWs = $state<string | null>(null);
+
+  /**
+   * "Add a workspace" from anywhere that isn't a project row: it goes under the active
+   * project, and with no project yet the only sensible first step is to add one.
+   */
+  function newWorkspaceForActive() {
+    if (app.activeProjectId) newWorkspaceProj = app.activeProjectId;
+    else showNewProject = true;
+  }
   let muted = $state(false);
   // macOS hides the native traffic-light buttons in fullscreen; track it so the
   // titlebar's left inset (which reserves room for those buttons) can collapse and
@@ -105,6 +119,11 @@
   onMount(() => {
     app.load();
     installAudioUnlock();
+    // Painted from the last run's answer before any gh process exists, so the PR chip is
+    // populated on the first frame instead of a second later.
+    loadPrCache();
+    // Then fill in every other project, once the launch has settled.
+    const warm = setTimeout(() => void warmAllProjects(), 1200);
 
     // Attach keyboard handler
     window.addEventListener("keydown", onKeydown);
@@ -145,6 +164,7 @@
     return () => {
       window.removeEventListener("keydown", onKeydown);
       window.removeEventListener("focus", recheckPaths);
+      clearTimeout(warm);
       un.then((f) => f());
       unResize.then((f) => f()).catch(() => {});
       unClose.then((f) => f()).catch(() => {});
@@ -155,6 +175,12 @@
   // for both add and remove.
   function recheckPaths() {
     void app.checkWorkspacePaths();
+    // A folder can become (or stop being) a repo while the app is open — `git init`,
+    // a clone finishing — and that decides whether it can spawn worktree workspaces.
+    void app.refreshProjectGit();
+    // Coming back to the window is exactly when a PR was opened, reviewed or merged in
+    // the browser, so the chip re-checks rather than showing what was true before.
+    if (app.activeWorkspaceId) void loadPrs(app.activeWorkspaceId, true);
   }
 
   /**
@@ -223,13 +249,13 @@
       // Agents-only actions
       else if (shortcut.action === "new-claude-agent") {
         if (app.activeWorkspaceId) app.newClaudeInActive();
-        else showNewWorkspace = true;
+        else newWorkspaceForActive();
       } else if (shortcut.action === "split-pane-vertical") {
         if (app.activeWorkspaceId) app.splitFocused("row");
-        else showNewWorkspace = true;
+        else newWorkspaceForActive();
       } else if (shortcut.action === "split-pane-horizontal") {
         if (app.activeWorkspaceId) app.splitFocused("col");
-        else showNewWorkspace = true;
+        else newWorkspaceForActive();
       } else if (shortcut.action === "flip-split") {
         if (app.activeAgent) app.flipSplitOf(app.activeAgent.id);
       } else if (shortcut.action === "close-current-agent") {
@@ -255,6 +281,331 @@
   /** Popover menu (the workspace picker) — position plus its items, or null when closed. */
   let popupMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
+  interface PullRequest {
+    number: number;
+    title: string;
+    url: string;
+    state: string;
+    is_draft: boolean;
+    head_ref: string;
+    author: string;
+    updated_at: string;
+    review_decision: string | null;
+    is_current: boolean;
+  }
+
+  /**
+   * PR listings per workspace. Kept in memory rather than persisted: PR state goes stale
+   * the moment someone pushes, and a number restored from disk would be a lie.
+   */
+  let prCache = $state<Record<string, PullRequest[]>>({});
+  /** When each entry was fetched, so a stale one can be refreshed behind the menu. */
+  let prFetchedAt = $state<Record<string, number>>({});
+  /**
+   * Fetches in flight, by workspace. A map rather than a set so a second caller can AWAIT
+   * the first one's result instead of racing past it — opening the menu while the
+   * prefetch is still running must wait for that answer, not paint an empty list over it.
+   */
+  const prInFlight = new Map<string, Promise<void>>();
+  /** Per-workspace failure (a repo with no GitHub remote, say), shown instead of "none". */
+  let prError = $state<Record<string, string>>({});
+  /**
+   * Set when gh itself is the problem (missing, or not signed in) rather than this repo.
+   * Prefetching stops while it holds — spawning a login shell per workspace switch to
+   * re-learn the same answer is pure cost. Cleared by "Try again" in the menu.
+   */
+  let prUnavailable = $state<string | null>(null);
+
+  /** Long enough that switching between workspaces is free; short enough to stay honest. */
+  const PR_TTL_MS = 90_000;
+  const PR_STORE_KEY = "codesu.prs.v1";
+
+  /**
+   * Keep the cache across restarts.
+   *
+   * Every `gh` call costs a process spawn plus a network round trip, so a cold app used to
+   * show a blank chip for a second on launch — the moment it most needs to be right. The
+   * last known answer is written here and read back on mount, which is shown IMMEDIATELY
+   * and then revalidated in the background. localStorage rather than the app store because
+   * this is a cache, not state: losing it costs one refetch, and it must never travel into
+   * a state file that means something.
+   */
+  function savePrCache() {
+    try {
+      localStorage.setItem(
+        PR_STORE_KEY,
+        JSON.stringify({ prs: prCache, at: prFetchedAt }),
+      );
+    } catch {
+      /* a full or disabled localStorage just means no warm start */
+    }
+  }
+
+  function loadPrCache() {
+    try {
+      const raw = localStorage.getItem(PR_STORE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as {
+        prs?: Record<string, PullRequest[]>;
+        at?: Record<string, number>;
+      };
+      if (saved.prs) prCache = saved.prs;
+      // Timestamps are restored too, so a fresh-enough cache is not refetched on launch
+      // — but anything past the TTL revalidates immediately, as it should.
+      if (saved.at) prFetchedAt = saved.at;
+    } catch {
+      /* unreadable cache is no cache */
+    }
+  }
+
+  /** The branch a workspace's PRs should be matched against. */
+  function branchOf(ws: { id: string; branch: string | null }): string | null {
+    // A worktree knows its own branch; the primary checkout's branch is whatever HEAD
+    // says, which the gitStatus poll already told us.
+    return ws.branch ?? (ws.id === app.activeWorkspaceId ? headBranch : null);
+  }
+
+  /** The PR for the workspace's own branch, if we have fetched one. */
+  const currentPr = $derived.by(() => {
+    const ws = app.activeWorkspace;
+    if (!ws) return null;
+    const list = prCache[ws.id];
+    if (!list) return null;
+    const branch = branchOf(ws);
+    return list.find((p) => p.is_current || (branch && p.head_ref === branch)) ?? null;
+  });
+
+  /**
+   * Fetch the active workspace's PRs, ahead of anyone asking for them.
+   *
+   * This runs on workspace switch rather than on click so the chip is already showing
+   * "#42" by the time it is looked at — a chip you have to press and then wait on tells
+   * you nothing at a glance, which was the whole point of putting it in the titlebar.
+   *
+   * Cheap by construction: one gh call per workspace, skipped entirely while a fresh
+   * result is cached, and the OPEN half of the answer is repo-wide, so every sibling
+   * workspace in the same project is seeded from the same response.
+   */
+  function loadPrs(wsId: string, force = false): Promise<void> {
+    const running = prInFlight.get(wsId);
+    if (running) return running;
+
+    const ws = app.workspaces.find((w) => w.id === wsId);
+    const proj = app.projectOf(wsId);
+    if (!ws || !proj?.isGit) return Promise.resolve();
+    if (prUnavailable && !force) return Promise.resolve();
+
+    const fresh = untrack(() => Date.now() - (prFetchedAt[wsId] ?? 0) < PR_TTL_MS);
+    if (fresh && !force) return Promise.resolve();
+
+    const repo = ws.repo ?? proj.path;
+    const branch = branchOf(ws);
+    const run = (async () => {
+      try {
+        const prs = await invoke<PullRequest[]>("list_pull_requests", { repo, branch });
+        prCache[wsId] = prs;
+        prFetchedAt[wsId] = Date.now();
+        prUnavailable = null;
+        delete prError[wsId];
+        seedSiblings(proj.id, wsId, prs);
+        savePrCache();
+      } catch (err) {
+        const message = String(err instanceof Error ? err.message : err);
+        // A broken repo is this workspace's problem; a missing or signed-out gh is every
+        // workspace's, and must not be re-discovered on each switch.
+        if (message.includes("gh") || message.includes("GitHub CLI")) prUnavailable = message;
+        else prError[wsId] = message;
+        prFetchedAt[wsId] = Date.now();
+      } finally {
+        prInFlight.delete(wsId);
+      }
+    })();
+    prInFlight.set(wsId, run);
+    return run;
+  }
+
+  /**
+   * Share one repo's open PRs with the project's other workspaces.
+   *
+   * `gh pr list --state open` is repo-wide, so the answer for one workspace already
+   * contains the answer for its siblings — seeding them here means switching between
+   * branches of the same project shows their numbers instantly, with no second call.
+   * Only OPEN entries travel: the closed/merged ones in a response belong to the branch
+   * that was asked about, not to anyone else.
+   */
+  function seedSiblings(projectId: string, sourceWsId: string, prs: PullRequest[]) {
+    const open = prs.filter((p) => p.state === "OPEN");
+    for (const sib of app.workspacesOf(projectId)) {
+      if (sib.id === sourceWsId || prCache[sib.id]) continue;
+      const branch = sib.branch;
+      if (!branch) continue;
+      prCache[sib.id] = open.map((p) => ({ ...p, is_current: p.head_ref === branch }));
+      // Deliberately NOT stamped as fetched: this is a good-enough preview, and the
+      // workspace still earns its own full fetch (closed PRs included) when opened.
+    }
+  }
+
+  // Prefetch whenever the workspace you are looking at changes.
+  $effect(() => {
+    const id = app.activeWorkspaceId;
+    // Tracked so a primary workspace re-fetches once its branch is known.
+    void headBranch;
+    if (!id || !inWorkspaceView) return;
+    void loadPrs(id);
+  });
+
+  /**
+   * Warm every project once, shortly after launch.
+   *
+   * One call per PROJECT, not per workspace: the sweep is repo-wide, so a single answer
+   * seeds every workspace under it. That means switching to any workspace — not just the
+   * one that happened to be open — finds its chip already filled in.
+   *
+   * Staggered and deferred so it competes with nothing: the active workspace has already
+   * been asked for by the effect above, and the rest can wait a moment.
+   */
+  async function warmAllProjects() {
+    const projects = app.liveProjects.filter((p) => p.isGit);
+    for (const proj of projects) {
+      if (prUnavailable) return;
+      const ws = app.workspacesOf(proj.id)[0];
+      if (!ws) continue;
+      await loadPrs(ws.id);
+      // A gap between repos so a machine with many projects does not spawn a burst of
+      // gh processes on top of everything else a launch is doing.
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+
+  /** Colour by state, so the list is scannable before any label is read. */
+  function prColor(pr: PullRequest): string {
+    if (pr.state === "MERGED") return "#a371f7";
+    if (pr.state === "CLOSED") return "#f85149";
+    if (pr.is_draft) return "#8b949e";
+    if (pr.review_decision === "CHANGES_REQUESTED") return "#d29922";
+    return "#3fb950";
+  }
+
+  /** The PR's state in one word, the way GitHub itself says it. */
+  function prState(pr: PullRequest): string {
+    if (pr.state === "MERGED") return "merged";
+    if (pr.state === "CLOSED") return "closed";
+    if (pr.is_draft) return "draft";
+    if (pr.review_decision === "APPROVED") return "approved";
+    if (pr.review_decision === "CHANGES_REQUESTED") return "changes requested";
+    return "open";
+  }
+
+  function prLabel(pr: PullRequest): string {
+    // Menu rows size to their content and PR titles run long; an untruncated one would
+    // stretch the popup past the window. Truncated here rather than in the menu's CSS so
+    // every other menu in the app keeps sizing to its own labels.
+    const title = pr.title.length > 44 ? `${pr.title.slice(0, 43).trimEnd()}…` : pr.title;
+    // "open" is the resting state and the green dot already says it; only the states
+    // worth stopping on are spelled out.
+    const state = prState(pr);
+    return `#${pr.number}  ${title}` + (state === "open" ? "" : `  ·  ${state}`);
+  }
+
+  /** The PR menu's rows: this branch's PRs first, then the rest of the repo's open ones. */
+  function buildPrItems(prs: PullRequest[], repo: string): MenuItem[] {
+    const items: MenuItem[] = [];
+    const mine = prs.filter((p) => p.is_current);
+    const others = prs.filter((p) => !p.is_current);
+
+    if (mine.length) {
+      for (const pr of mine) {
+        items.push({ label: prLabel(pr), color: prColor(pr), onSelect: () => void openUrl(pr.url) });
+      }
+    } else {
+      items.push({ label: "No pull request for this branch", disabled: true });
+    }
+    if (others.length) {
+      items.push({ label: "Other open pull requests", disabled: true, separatorBefore: true });
+      for (const pr of others) {
+        items.push({
+          label: `${prLabel(pr)}  ·  ${pr.head_ref}`,
+          color: prColor(pr),
+          onSelect: () => void openUrl(pr.url),
+        });
+      }
+    }
+    items.push({
+      label: "Open repository on GitHub",
+      separatorBefore: true,
+      onSelect: () => {
+        invoke<string>("github_repo_url", { repo })
+          .then((url) => openUrl(url))
+          .catch((err) => console.error("[Codesu] repo url failed", err));
+      },
+    });
+    return items;
+  }
+
+  /**
+   * Pull requests for the active workspace, opened straight from the titlebar.
+   *
+   * The menu opens BEFORE the fetch resolves, showing a placeholder, because `gh` against
+   * a cold network is slow enough that a chip which does nothing for a second reads as
+   * broken. Results are swapped into the same open menu when they land.
+   *
+   * The repo is the PROJECT's path, not the workspace's: a worktree has the same remote,
+   * and asking git from the main checkout is the case that is always set up.
+   */
+  async function showPrMenu(e: MouseEvent) {
+    const ws = app.activeWorkspace;
+    if (!ws) return;
+    const repo = ws.repo ?? app.projectOf(ws.id)?.path ?? ws.path;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const at = { x: Math.min(r.left, window.innerWidth - 420), y: r.bottom + 4 };
+    const render = (items: MenuItem[]) => (popupMenu = { ...at, items });
+    const wsId = ws.id;
+
+    // Straight from the prefetch in the overwhelming majority of cases. A spinner only
+    // appears when the prefetch has not landed yet — a cold start, or a workspace opened
+    // within the same instant it was switched to.
+    if (prUnavailable) {
+      render([
+        { label: prUnavailable, disabled: true },
+        {
+          label: "Try again",
+          separatorBefore: true,
+          onSelect: () => {
+            prUnavailable = null;
+            void showPrMenu(e);
+          },
+        },
+      ]);
+      return;
+    }
+    const cached = prCache[wsId];
+    render(cached ? buildPrItems(cached, repo) : [{ label: "Loading pull requests…", disabled: true }]);
+
+    // Refresh behind the open menu so a PR opened since the prefetch still turns up. If a
+    // prefetch is already running this joins it rather than starting a second.
+    await loadPrs(wsId, true);
+    // Only repaint if this menu is still the one on screen — the user may have dismissed
+    // it, or opened another, while gh was thinking.
+    if (!popupMenu) return;
+    const failure = prUnavailable ?? prError[wsId];
+    if (failure) {
+      render([
+        { label: failure, disabled: true },
+        {
+          label: "Try again",
+          separatorBefore: true,
+          onSelect: () => {
+            prUnavailable = null;
+            delete prError[wsId];
+            void showPrMenu(e);
+          },
+        },
+      ]);
+      return;
+    }
+    render(buildPrItems(prCache[wsId] ?? [], repo));
+  }
+
   /**
    * Workspace picker on the titlebar chip.
    *
@@ -264,16 +615,28 @@
    */
   function showWorkspaceMenu(e: MouseEvent) {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const items: MenuItem[] = app.liveWorkspaces.map((w) => ({
-      label: w.name,
-      color: w.color,
-      checked: w.id === app.activeWorkspaceId,
-      onSelect: () => app.setActiveWorkspace(w.id),
-    }));
+    // Grouped by project, in the rail's own order: workspace names ("main", "fix/…")
+    // repeat across projects, so a flat list of them cannot be navigated.
+    const items: MenuItem[] = [];
+    for (const proj of app.liveProjects) {
+      const spaces = app.workspacesOf(proj.id);
+      if (!spaces.length) continue;
+      let first = true;
+      for (const w of spaces) {
+        items.push({
+          label: first ? `${proj.name} / ${w.name}` : `    ${w.name}`,
+          color: w.color,
+          checked: w.id === app.activeWorkspaceId,
+          separatorBefore: first && items.length > 0,
+          onSelect: () => app.setActiveWorkspace(w.id),
+        });
+        first = false;
+      }
+    }
     items.push({
       label: "New workspace…",
       separatorBefore: true,
-      onSelect: () => (showNewWorkspace = true),
+      onSelect: newWorkspaceForActive,
     });
     popupMenu = { x: Math.min(r.left, window.innerWidth - 240), y: r.bottom + 4, items };
   }
@@ -334,6 +697,9 @@
     app.activeTabGroups.some((g) => g.agents.some((a) => a.state === "done")),
   );
 
+  /** The branch the active workspace's checkout is actually on (see the gitStatus poll). */
+  let headBranch = $state<string | null>(null);
+
   /** Code and Review belong to the workspace views; elsewhere they have nothing to act on. */
   const inWorkspaceView = $derived(view === "agents" || view === "code" || view === "review");
 
@@ -352,9 +718,17 @@
           return;
         }
         const st = await gitStatus(root);
-        if (!cancelled) changedPaths = st.changes.map((c) => c.path);
+        if (!cancelled) {
+          changedPaths = st.changes.map((c) => c.path);
+          // Free, from a call already being made: a primary workspace has no `branch`
+          // of its own, so without this the main checkout could never match a PR.
+          headBranch = st.branch ?? null;
+        }
       } catch {
-        if (!cancelled) changedPaths = null;
+        if (!cancelled) {
+          changedPaths = null;
+          headBranch = null;
+        }
       }
     };
 
@@ -408,7 +782,7 @@
   }
   function newAgentForActive() {
     if (app.activeWorkspaceId) newAgentWs = app.activeWorkspaceId;
-    else showNewWorkspace = true;
+    else newWorkspaceForActive();
   }
 </script>
 
@@ -461,6 +835,10 @@
       onclick={toggleMute}
     ><Icon name={muted ? "volumeMute" : "volume"} size={15} /></button>
     {#if (view === "agents" || view === "code" || view === "review") && app.activeWorkspace}
+      <!-- Derived from the WORKSPACE, never from activeProjectId: two independent ids
+           can drift apart, and a chip naming one project while the panes show another
+           is worse than no chip at all. -->
+      {@const crumbProj = app.projectOf(app.activeWorkspace.id)}
       <span class="crumbs">
         <button
           class="ws-chip"
@@ -468,12 +846,34 @@
           title="Switch workspace"
           onclick={showWorkspaceMenu}
         >
-          <span class="d"></span>{app.activeWorkspace.name}
+          <!-- Project first, then the workspace inside it: workspace names repeat
+               across projects ("main", "fix/…"), so the name alone does not locate you. -->
+          <span class="d"></span>{#if crumbProj}<span class="proj">{crumbProj.name}</span
+            ><span class="sep">/</span>{/if}{app.activeWorkspace.name}
           <Icon name="chevronDown" size={12} />
         </button>
         {#if view === "agents" && app.activeAgent}<span class="arrow">›</span><span class="ag"
             >{app.activeAgent.name}</span
           >{/if}
+        <!--
+          Review happens on GitHub, so the workspace only has to get you there. The chip
+          wears the branch's PR number once we know it, which doubles as the answer to
+          "did I already open one for this?" without a trip to the browser.
+        -->
+        {#if crumbProj?.isGit}
+          <button
+            class="pr-chip"
+            class:has-pr={!!currentPr}
+            style={currentPr ? `--pr:${prColor(currentPr)}` : ""}
+            title={currentPr
+              ? `#${currentPr.number} ${currentPr.title} — ${prState(currentPr)} · open on GitHub`
+              : "Pull requests for this workspace"}
+            onclick={showPrMenu}
+          >
+            <Icon name="pullRequest" size={13} />
+            <span class="pr-lbl">{currentPr ? `#${currentPr.number}` : "PRs"}</span>
+          </button>
+        {/if}
       </span>
     {/if}
     <!--
@@ -526,7 +926,8 @@
     -->
     {#if view === "agents"}
       <Sidebar
-        onNewWorkspace={() => (showNewWorkspace = true)}
+        onNewProject={() => (showNewProject = true)}
+        onNewWorkspace={(projectId) => (newWorkspaceProj = projectId)}
         onNewAgent={openNewAgent}
         onOpenCode={openCodeFromSidebar}
       />
@@ -579,9 +980,24 @@
   </div>
 </div>
 
-{#if showNewWorkspace}
+{#if showNewProject}
+  <NewProjectDialog
+    onClose={() => (showNewProject = false)}
+    onCreated={(project, created) => {
+      // A brand-new project opens on its own folder with one agent ready to talk to,
+      // rather than on an empty pane the user has to furnish first. Only a REAL create:
+      // re-picking a folder you already track just selects it, and seeding an agent
+      // there would spawn an unasked-for Claude (and its PTY) in an open workspace.
+      if (!created) return;
+      const primary = app.workspacesOf(project.id)[0];
+      if (primary) app.addAgent({ workspaceId: primary.id, kind: "claude", run: "claude" });
+    }}
+  />
+{/if}
+{#if newWorkspaceProj}
   <NewWorkspaceDialog
-    onClose={() => (showNewWorkspace = false)}
+    projectId={newWorkspaceProj}
+    onClose={() => (newWorkspaceProj = null)}
     onCreated={(ws) => {
       app.addAgent({
         workspaceId: ws.id,
@@ -809,6 +1225,49 @@
     background: var(--accent);
     flex-shrink: 0;
   }
+  /* The project is the context, the workspace is the subject: the project name is
+     dimmed so the eye lands on which workspace you are in. */
+  .ws-chip .proj {
+    color: var(--text-muted);
+  }
+  .ws-chip .sep {
+    color: var(--text-ghost);
+    margin: 0 3px;
+  }
+  /* A quiet sibling to the workspace chip: same height and radius, no accent dot, and
+     it only takes colour once there is a PR to point at. */
+  .pr-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 22px;
+    padding: 0 8px;
+    margin-left: 6px;
+    border: 1px solid var(--border-2);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-3);
+    font-size: 11.5px;
+    cursor: pointer;
+    transition:
+      background 0.12s ease,
+      color 0.12s ease,
+      border-color 0.12s ease;
+  }
+  .pr-chip:hover {
+    background: var(--surface-3);
+    color: var(--text-1);
+    border-color: var(--border-1);
+  }
+  .pr-chip.has-pr {
+    color: var(--pr);
+    border-color: color-mix(in srgb, var(--pr) 40%, transparent);
+  }
+  .pr-lbl {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+  }
+
   .arrow {
     color: var(--text-ghost);
     margin: 0 2px;
