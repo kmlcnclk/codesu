@@ -11,6 +11,8 @@
 //! - `state.json.bak` — the previous good copy, rotated on every save.
 //! - `state.json.tmp` — scratch file for the atomic write.
 //! - `state.corrupt.json` — quarantined bytes of an unreadable live file.
+//! - `state.pre-projects.json` — one-time archive taken the first time a state file
+//!   from before the projects tree is loaded (see `archive_pre_projects`).
 //!
 //! Writes go temp → fsync → rotate backup → atomic rename, so a crash or power
 //! loss can never leave a truncated `state.json`, and an unreadable one always
@@ -29,6 +31,8 @@ const STATE_FILE: &str = "state.json";
 const BAK_FILE: &str = "state.json.bak";
 const TMP_FILE: &str = "state.json.tmp";
 const CORRUPT_FILE: &str = "state.corrupt.json";
+/// One-time archive of the last pre-`projects` state (see `archive_pre_projects`).
+const PRE_PROJECTS_FILE: &str = "state.pre-projects.json";
 /// The folder earlier releases used, derived from the reverse-DNS bundle identifier.
 const LEGACY_DIR: &str = "com.kmlcnclk.codesu";
 
@@ -217,13 +221,45 @@ fn save_to_dir(dir: &Path, state: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Keep one copy of the last state written before the projects tree existed.
+///
+/// `state.json.bak` holds only the PREVIOUS save, and saves run on a 250ms debounce, so
+/// it is overwritten seconds after launch — useless as a way back from a structural
+/// migration that rewrites how every workspace is filed. This snapshot is taken once,
+/// never overwritten, and never read by the app: it exists purely so a migration that
+/// goes wrong is recoverable by hand.
+///
+/// Best-effort by design — a failure here must not stop the app from loading.
+fn archive_pre_projects(dir: &Path, state: &Value) {
+    // Only a state file that predates the migration, and only if there is real content
+    // to lose. Once `projects` is present, this has already been done (or never applied).
+    let legacy = state.get("projects").is_none()
+        && state
+            .get("workspaces")
+            .and_then(|w| w.as_array())
+            .is_some_and(|w| !w.is_empty());
+    if !legacy {
+        return;
+    }
+    let archive = dir.join(PRE_PROJECTS_FILE);
+    if archive.exists() {
+        return;
+    }
+    let live = dir.join(STATE_FILE);
+    if live.exists() && fs::copy(&live, &archive).is_ok() {
+        set_private(&archive);
+    }
+}
+
 /// Load the persisted state blob (opaque JSON owned by the frontend), or `null` if
 /// absent. Migrates data from the old identifier-named folder on first launch.
 pub fn load(app: &AppHandle) -> Result<Value, String> {
     let dir = state_dir(app)?;
     let base = app.path().data_dir().map_err(|e| e.to_string())?;
     migrate_legacy_dir(&dir, &base.join(LEGACY_DIR))?;
-    load_from_dir(&dir)
+    let state = load_from_dir(&dir)?;
+    archive_pre_projects(&dir, &state);
+    Ok(state)
 }
 
 /// Persist the state blob atomically, keeping a rotating backup.
@@ -470,6 +506,44 @@ mod tests {
             assert!(!is_safe_session_id(bad), "{bad:?} must be rejected");
             assert!(!claude_session_exists(bad));
         }
+    }
+
+    #[test]
+    fn pre_projects_state_is_archived_once_and_never_overwritten() {
+        let d = TempDir::new();
+        let legacy = json!({ "workspaces": [{ "id": "w1" }], "agents": [] });
+        save_to_dir(d.path(), &legacy).unwrap();
+
+        archive_pre_projects(d.path(), &legacy);
+        let archive = d.path().join(PRE_PROJECTS_FILE);
+        assert!(archive.exists(), "a pre-projects state must be archived");
+        assert!(read(archive.clone()).contains("w1"));
+
+        // A later load must not clobber the archive with post-migration content.
+        let migrated = json!({ "projects": [{ "id": "p1" }], "workspaces": [{ "id": "w1" }] });
+        save_to_dir(d.path(), &migrated).unwrap();
+        archive_pre_projects(d.path(), &migrated);
+        assert!(!read(archive.clone()).contains("p1"));
+
+        // Even a second legacy-shaped load leaves the original archive alone.
+        archive_pre_projects(d.path(), &legacy);
+        assert!(!read(archive).contains("p1"));
+    }
+
+    #[test]
+    fn empty_or_migrated_state_is_not_archived() {
+        let d = TempDir::new();
+        // Already migrated: nothing to preserve.
+        let migrated = json!({ "projects": [], "workspaces": [{ "id": "w1" }] });
+        save_to_dir(d.path(), &migrated).unwrap();
+        archive_pre_projects(d.path(), &migrated);
+        assert!(!d.path().join(PRE_PROJECTS_FILE).exists());
+
+        // A fresh install has no workspaces, so there is no history to lose.
+        let fresh = json!({ "workspaces": [] });
+        save_to_dir(d.path(), &fresh).unwrap();
+        archive_pre_projects(d.path(), &fresh);
+        assert!(!d.path().join(PRE_PROJECTS_FILE).exists());
     }
 
     #[test]
