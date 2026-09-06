@@ -340,6 +340,28 @@ export interface ReviewComment {
   createdAt: number;
 }
 
+/**
+ * How much Claude is allowed to do without stopping to ask.
+ *
+ * Codesu runs Claude in a PTY, so every permission prompt is a hard stop that
+ * blocks the agent until a human comes back to the pane — the thing that makes a
+ * roster of parallel agents feel like a queue of interruptions. Passing
+ * `--permission-mode` on launch lets the user set that bar once instead of
+ * answering the same question per agent, per tool, per session.
+ *
+ *   ask     — Claude's own default: confirm before edits and commands.
+ *   edits   — auto-accept file edits; still asks before running commands.
+ *   full    — never ask (`bypassPermissions`). Fast, and entirely unsupervised.
+ */
+export type ClaudePermissionMode = "ask" | "edits" | "full";
+
+/** CLI value for each mode; "ask" is the CLI default, so it passes no flag. */
+const PERMISSION_FLAG: Record<ClaudePermissionMode, string> = {
+  ask: "",
+  edits: " --permission-mode acceptEdits",
+  full: " --permission-mode bypassPermissions",
+};
+
 const KIND_LABELS: Record<AgentKind, string> = {
   claude: "Claude",
   shell: "Shell",
@@ -464,6 +486,12 @@ class AppState {
   tabLayouts = $state<Record<string, LayoutNode>>({});
   /** Default project paths to pre-populate in workspace creation. */
   defaultProjects = $state<string[]>([]);
+  /**
+   * How much new and resumed Claude agents may do unattended. Defaults to "edits"
+   * so a fresh install doesn't stop on every file write — see
+   * {@link ClaudePermissionMode}.
+   */
+  claudePermissionMode = $state<ClaudePermissionMode>("edits");
   /** System terminal scroll position memory. */
   terminalScrollPos = $state(0);
   /** Keyboard shortcuts configuration. */
@@ -2237,11 +2265,14 @@ class AppState {
         //  - `--session-id <id>` errors if it already exists.
         // Chaining with `||` picks the right one automatically. We order by the
         // likely case (sessionStarted) just to avoid an error flash on the common path.
+        // Same permission bar on both halves of the `||` — whichever one wins, the
+        // agent must not fall back to prompting for everything.
+        const perm = PERMISSION_FLAG[this.claudePermissionMode];
         return agent.sessionStarted
-          ? `claude --resume ${id} || claude --session-id ${id}`
-          : `claude --session-id ${id}${seed} || claude --resume ${id}${seed}`;
+          ? `claude --resume ${id}${perm} || claude --session-id ${id}${perm}`
+          : `claude --session-id ${id}${perm}${seed} || claude --resume ${id}${perm}${seed}`;
       }
-      return "claude";
+      return `claude${PERMISSION_FLAG[this.claudePermissionMode]}`;
     }
     return agent.run;
   }
@@ -2272,6 +2303,14 @@ class AppState {
   }
 
   // ---------- settings ----------
+
+  setClaudePermissionMode(mode: ClaudePermissionMode) {
+    if (this.claudePermissionMode === mode) return;
+    this.claudePermissionMode = mode;
+    this.persist();
+    // Existing panes keep the mode they launched with; the next (re)spawn picks
+    // this up via effectiveRun().
+  }
 
   addDefaultProject(path: string) {
     const trimmed = path.trim();
@@ -2424,6 +2463,7 @@ class AppState {
       activeTabByWs: this.activeTabByWs,
       tabLayouts: this.liveTabLayouts(),
       defaultProjects: this.defaultProjects,
+      claudePermissionMode: this.claudePermissionMode,
       terminalScrollPos: this.terminalScrollPos,
       shortcuts: this.shortcuts,
       pageViews: this.pageViews,
@@ -2604,6 +2644,12 @@ class AppState {
         this.tabLayouts =
           data.tabLayouts && typeof data.tabLayouts === "object" ? data.tabLayouts : {};
         this.defaultProjects = Array.isArray(data.defaultProjects) ? data.defaultProjects : [];
+        this.claudePermissionMode =
+          data.claudePermissionMode === "ask" ||
+          data.claudePermissionMode === "edits" ||
+          data.claudePermissionMode === "full"
+            ? data.claudePermissionMode
+            : "edits";
         this.terminalScrollPos = typeof data.terminalScrollPos === "number" ? data.terminalScrollPos : 0;
         // Load shortcuts with merge of defaults to catch new/updated shortcuts
         const defaults = this.getDefaultShortcuts();

@@ -1,7 +1,17 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { app, type Shortcut } from "$lib/store/app.svelte";
+  import { app, type ClaudePermissionMode, type Shortcut } from "$lib/store/app.svelte";
   import Icon from "./Icon.svelte";
+
+  const PERM_MODES: { id: ClaudePermissionMode; label: string; desc: string }[] = [
+    { id: "ask", label: "Ask every time", desc: "Claude's default — confirms before edits and before running commands." },
+    { id: "edits", label: "Auto-accept edits", desc: "File edits go through silently; commands still ask." },
+    {
+      id: "full",
+      label: "Never ask",
+      desc: "Runs everything unattended, commands included. Best on a worktree you can throw away.",
+    },
+  ];
 
   let newPath = $state("");
   let error = $state<string | null>(null);
@@ -98,7 +108,7 @@
   <header class="page-head">
     <div class="titles">
       <h1>Settings</h1>
-      <p>Default projects and keyboard shortcuts for Codesu.</p>
+      <p>Default projects, Claude permissions and keyboard shortcuts for Codesu.</p>
     </div>
   </header>
 
@@ -136,6 +146,32 @@
     {#if error}
       <p class="error">{error}</p>
     {/if}
+  </div>
+
+  <!-- Claude Permissions Section -->
+  <div class="section">
+    <h2 class="section-title">Claude permissions</h2>
+    <p class="desc">
+      How much a Claude agent may do before it stops to ask you. Takes effect the next time
+      an agent starts or resumes.
+    </p>
+
+    <div class="perm-list">
+      {#each PERM_MODES as m (m.id)}
+        <button
+          class="perm-item"
+          class:on={app.claudePermissionMode === m.id}
+          aria-pressed={app.claudePermissionMode === m.id}
+          onclick={() => app.setClaudePermissionMode(m.id)}
+        >
+          <span class="perm-radio" aria-hidden="true"></span>
+          <span class="perm-text">
+            <span class="perm-label">{m.label}</span>
+            <span class="perm-desc">{m.desc}</span>
+          </span>
+        </button>
+      {/each}
+    </div>
   </div>
 
   <!-- Keyboard Shortcuts Section -->
@@ -266,6 +302,69 @@
     margin: 0 0 16px;
     font-size: 13px;
     color: var(--text-secondary);
+  }
+
+  /* Same bordered stack as .projects-list, but each row is the radio itself. */
+  .perm-list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .perm-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    width: 100%;
+    padding: 12px 14px;
+    text-align: left;
+    background: var(--surface-1);
+    border: none;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    font: inherit;
+  }
+
+  .perm-item:last-child {
+    border-bottom: none;
+  }
+
+  .perm-item:hover {
+    background: var(--surface-2);
+  }
+
+  .perm-radio {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    margin-top: 2px;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    box-sizing: border-box;
+  }
+
+  .perm-item.on .perm-radio {
+    border-color: var(--accent);
+    border-width: 4px;
+  }
+
+  .perm-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .perm-label {
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .perm-desc {
+    font-size: 12px;
+    color: var(--text-muted);
   }
 
   .projects-list {
