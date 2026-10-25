@@ -50,6 +50,7 @@
       "<path d='M10.3 4 1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0Z'/><path d='M12 9.5v4'/><path d='M12 17.2h.01'/>",
     clipboard:
       "<rect x='5' y='4' width='14' height='17' rx='2'/><path d='M9 4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V5H9Z'/><path d='M9 13l2 2 4-4'/>",
+    hash: "<path d='M4.5 9h15'/><path d='M4.5 15h15'/><path d='M10 4 8 20'/><path d='M16 4l-2 16'/>",
     inbox:
       "<path d='M22 12h-5l-2 3H9l-2-3H2'/><path d='M5.5 5.5 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.5A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.5Z'/>",
     // attachments

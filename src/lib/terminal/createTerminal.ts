@@ -226,16 +226,24 @@ export async function createTerminal(
     else if (typeof msg === "string") emit(msg);
   };
 
-  await invoke("start_pty", {
-    id,
-    cols: term.cols,
-    rows: term.rows,
-    shell: options.shell ?? null,
-    cwd: options.cwd ?? null,
-    run: options.run ?? null,
-    env: options.env ?? null,
-    onData,
-  });
+  try {
+    await invoke("start_pty", {
+      id,
+      cols: term.cols,
+      rows: term.rows,
+      shell: options.shell ?? null,
+      cwd: options.cwd ?? null,
+      run: options.run ?? null,
+      env: options.env ?? null,
+      onData,
+    });
+  } catch (e) {
+    // The terminal was already opened into the container; without this a Retry would
+    // stack a second xterm under the dead one (and burn another WebGL context).
+    if (webglTimer) clearTimeout(webglTimer);
+    term.dispose();
+    throw e;
+  }
 
   // We mirror the current prompt in `buf` so that, on Enter, we can trim leading
   // and trailing whitespace before it reaches the agent. `claude` enables the

@@ -21,3 +21,6 @@ vite.config.ts.timestamp-*
 # Local git worktree checkouts
 /.worktrees/
 .dnd-diag.log
+
+# Local screenshots / notes from test sessions
+/.context/

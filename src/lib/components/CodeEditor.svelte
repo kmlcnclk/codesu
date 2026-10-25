@@ -178,6 +178,11 @@
   async function show(p: string) {
     const m = await modules();
     if (!container) return;
+    // `path` can move on while any of the awaits below are in flight (two quick tab
+    // clicks). A result for a file that is no longer the one requested is dropped,
+    // otherwise its text would be shown — and saved — under the other file's path.
+    const stale = () => path !== p;
+    if (stale()) return;
     error = null;
     conflict = false;
     let buf = buffers.get(p);
@@ -186,12 +191,14 @@
       try {
         buf = await load(p);
       } catch (e) {
+        if (stale()) return;
         error = String(e);
         loading = false;
         return;
       } finally {
         loading = false;
       }
+      if (stale()) return;
     } else if (!buf.dirty) {
       // Re-read on every focus: an agent editing this file in the background is the
       // normal case here, and silently showing a stale buffer is the one thing the
@@ -199,10 +206,15 @@
       // unsaved work wins until they choose (see the conflict bar).
       try {
         const file = await readTextFile(root, p);
+        if (stale()) return;
         if (file.content !== buf.saved) buf = await load(p);
+        // Same bytes, newer stamp (a formatter no-op, `touch`, a checkout): take the
+        // stamp, or the next save is refused as "changed on disk" for nothing.
+        else buf.modifiedMs = file.modifiedMs;
       } catch {
         /* the file may have been deleted; keep showing what we have */
       }
+      if (stale()) return;
     }
     refused = buf.refused;
     refusedSize = buf.size;
@@ -256,7 +268,9 @@
   /** Persist the current file. Returns false when the write was refused. */
   export async function save(force = false): Promise<boolean> {
     const p = path;
-    if (!p || !view || saving) return false;
+    // `shownPath` is the file whose text is actually in the view; while a swap is still
+    // loading they differ, and writing the view's text under `path` would cross files.
+    if (!p || !view || saving || shownPath !== p) return false;
     const buf = buffers.get(p);
     if (!buf) return false;
     const content = view.state.doc.toString();
@@ -287,6 +301,8 @@
     if (!p) return;
     buffers.delete(p);
     conflict = false;
+    // The edits are gone with the buffer, so the tab's unsaved dot goes too.
+    setDirty(p, false);
     await show(p);
   }
 

@@ -7,16 +7,22 @@
     onOpenNote,
   }: { onOpenAgent: (agentId: string) => void; onOpenNote: (noteId: string) => void } = $props();
 
-  // Finished agents grouped by their workspace (workspace-less agents last).
+  /** Read once per render; the store getter filters and sorts every agent on each call. */
+  const history = $derived(app.historyAgents);
+
+  // Finished agents grouped by their workspace. `historyAgents` is newest first, so the
+  // first agent of each group is its most recent one — groups are ordered by that, which
+  // puts the workspace you finished in most recently at the top (not the one created
+  // first, which is what the rail's order would give).
   const agentGroups = $derived.by(() => {
     const map = new Map<string, { ws: Workspace | undefined; agents: Agent[] }>();
-    for (const a of app.historyAgents) {
+    for (const a of history) {
       const key = a.workspaceId ?? "__none__";
       if (!map.has(key)) map.set(key, { ws: workspaceOf(a.workspaceId), agents: [] });
       map.get(key)!.agents.push(a);
     }
     return [...map.values()].sort(
-      (x, y) => (x.ws?.order ?? Infinity) - (y.ws?.order ?? Infinity),
+      (x, y) => app.historyTime(y.agents[0]) - app.historyTime(x.agents[0]),
     );
   });
 
@@ -50,6 +56,9 @@
     // whole workspace back. A plain "done" agent just returns to the board.
     if (agent.archived && agent.workspaceId) {
       app.unarchiveWorkspace(agent.workspaceId);
+      // Archived AND finished: bringing the workspace back is not enough, the agent
+      // would still be filtered out of the tab strip as "done".
+      if (app.effectiveLane(agent) === "done") app.restoreFromHistory(agent.id);
     } else {
       app.restoreFromHistory(agent.id);
     }
@@ -57,7 +66,7 @@
   }
 
   const empty = $derived(
-    app.historyAgents.length === 0 &&
+    history.length === 0 &&
       app.archivedWorkspaces.length === 0 &&
       app.archivedProjects.length === 0,
   );
@@ -73,8 +82,8 @@
       <div class="stats">
         <div class="stat">
           <span class="stat-ico" style="--c:var(--accent)"><Icon name="agents" size={16} /></span>
-          <span class="stat-n">{app.historyAgents.length}</span>
-          <span class="stat-l">agent{app.historyAgents.length === 1 ? "" : "s"}</span>
+          <span class="stat-n">{history.length}</span>
+          <span class="stat-l">agent{history.length === 1 ? "" : "s"}</span>
         </div>
         <div class="stat">
           <span class="stat-ico" style="--c:var(--warn)"><Icon name="folder" size={16} /></span>
@@ -94,10 +103,10 @@
       </div>
     {:else}
       <div class="wrap">
-        {#if app.historyAgents.length > 0}
+        {#if history.length > 0}
           <section>
             <h2 class="section-title">
-              <Icon name="agents" size={13} /> Agents <span class="c">{app.historyAgents.length}</span>
+              <Icon name="agents" size={13} /> Agents <span class="c">{history.length}</span>
             </h2>
 
             {#each agentGroups as group (group.ws?.id ?? "__none__")}
@@ -125,7 +134,7 @@
                             <span class="done-dot"></span><span>Done</span>
                           {/if}
                           <span class="dot-sep">·</span>
-                          <span>{relTime(agent.createdAt)}</span>
+                          <span title="Last active">{relTime(app.historyTime(agent))}</span>
                           {#if agent.exitCode !== null}
                             <span class="dot-sep">·</span>
                             <span class="mono">exit {agent.exitCode}</span>

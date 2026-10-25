@@ -54,8 +54,14 @@ function isSafeHref(url: string): boolean {
 
 /** Inline spans. Operates on already-escaped text. */
 function inline(s: string): string {
+  // Code spans are lifted out first so their contents are never read as emphasis
+  // (`HELLO_FROM_SCRIPT` used to come back with an italic FROM), then put back last.
+  const spans: string[] = [];
   return s
-    .replace(/`([^`]+)`/g, (_m, c) => `<code>${c}</code>`)
+    .replace(/`([^`]+)`/g, (_m, c) => {
+      spans.push(`<code>${c}</code>`);
+      return `\u0000${spans.length - 1}\u0000`;
+    })
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_]+)__/g, "<strong>$1</strong>")
     .replace(/~~([^~]+)~~/g, "<del>$1</del>")
@@ -65,7 +71,8 @@ function inline(s: string): string {
       isSafeHref(url)
         ? `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`
         : m, // unusable scheme: leave the source text, escaped, exactly as written
-    );
+    )
+    .replace(/\u0000(\d+)\u0000/g, (_m, i) => spans[Number(i)] ?? "");
 }
 
 /**
@@ -116,6 +123,26 @@ export function renderMarkdown(src: string): string {
     if (!line.trim()) {
       closeList();
       i++;
+      continue;
+    }
+
+    // GFM table: a `| a | b |` header followed by a `|---|---|` rule, then rows.
+    if (/^\s*\|.*\S/.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(lines[i + 1])) {
+      closeList();
+      const cells = (row: string) =>
+        row
+          .trim()
+          .replace(/^\||\|$/g, "")
+          .split("|")
+          .map((c) => inline(c.trim()));
+      const head = cells(line);
+      out.push(`<table><thead><tr>${head.map((c) => `<th>${c}</th>`).join("")}</tr></thead><tbody>`);
+      i += 2;
+      while (i < lines.length && /^\s*\|.*\S/.test(lines[i])) {
+        out.push(`<tr>${cells(lines[i]).map((c) => `<td>${c}</td>`).join("")}</tr>`);
+        i++;
+      }
+      out.push("</tbody></table>");
       continue;
     }
 

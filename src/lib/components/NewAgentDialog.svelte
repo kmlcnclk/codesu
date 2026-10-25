@@ -29,7 +29,8 @@
       name: name.trim() || undefined,
       kind,
       run: runCommandFor(kind, custom),
-      cwd,
+      // A cleared field is "use the workspace folder", not an empty path.
+      cwd: cwd?.trim() || null,
     });
     onClose();
   }

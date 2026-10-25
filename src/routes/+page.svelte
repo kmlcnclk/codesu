@@ -18,6 +18,7 @@
   import TasksPage from "$lib/components/TasksPage.svelte";
   import HistoryPage from "$lib/components/HistoryPage.svelte";
   import NotesPage from "$lib/components/NotesPage.svelte";
+  import { slack } from "$lib/slack.svelte";
   import DailyReport from "$lib/components/DailyReport.svelte";
   import SettingsPage from "$lib/components/SettingsPage.svelte";
   import SystemTerminalView from "$lib/components/SystemTerminalView.svelte";
@@ -117,7 +118,9 @@
   }
 
   onMount(() => {
-    app.load();
+    // Slack starts after the state is loaded: it needs the saved emoji and the list of
+    // messages already imported, or it would import them all again.
+    app.load().finally(() => slack.init());
     installAudioUnlock();
     // Painted from the last run's answer before any gh process exists, so the PR chip is
     // populated on the first frame instead of a second later.
@@ -849,7 +852,7 @@
           <!-- Project first, then the workspace inside it: workspace names repeat
                across projects ("main", "fix/…"), so the name alone does not locate you. -->
           <span class="d"></span>{#if crumbProj}<span class="proj">{crumbProj.name}</span
-            ><span class="sep">/</span>{/if}{app.activeWorkspace.name}
+            ><span class="sep">/</span>{/if}<span class="wsn">{app.activeWorkspace.name}</span>
           <Icon name="chevronDown" size={12} />
         </button>
         {#if view === "agents" && app.activeAgent}<span class="arrow">›</span><span class="ag"
@@ -1196,6 +1199,10 @@
     gap: 6px;
     font-size: 12px;
     max-width: 45%;
+    /* A flex item may shrink below its content only when told so; without this the
+       nav and the mode switch take the room first and the chip is cut to a letter. */
+    min-width: 0;
+    flex: 0 1 auto;
     overflow: hidden;
   }
   .ws-chip {
@@ -1229,6 +1236,70 @@
      dimmed so the eye lands on which workspace you are in. */
   .ws-chip .proj {
     color: var(--text-muted);
+  }
+  /* Long names shorten with an ellipsis instead of pushing the chip off the bar; the
+     workspace keeps a little more room than the project, which is only context. */
+  .ws-chip .proj,
+  .ws-chip .wsn {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ws-chip .proj {
+    flex: 0 1 auto;
+    min-width: 3ch;
+  }
+  .ws-chip .wsn {
+    flex: 0 1 auto;
+    min-width: 6ch;
+  }
+  .ws-chip {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+  }
+  /* The PR chip and the agent name sit beside the workspace chip: the chip never
+     shrinks (its number must stay legible), the agent name ellipsizes like the chip. */
+  .pr-chip {
+    flex: none;
+  }
+  .ag {
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+  /* Narrow windows: the nav keeps its icons and badges but drops the labels, then the
+     Code / Review switch does the same, so the workspace chip always keeps its name.
+     1240 and 980 are where the titlebar's content first stops fitting. */
+  @media (max-width: 1240px) {
+    .nav-lbl {
+      display: none;
+    }
+    .nav-btn {
+      padding-left: 9px;
+      padding-right: 9px;
+    }
+  }
+  @media (max-width: 980px) {
+    .cb-lbl {
+      display: none;
+    }
+  }
+  /* At the window's minimum width even the icons only just fit: the wordmark goes (the
+     mark stays), and the nav tightens, so the mode switch is never cut off. */
+  @media (max-width: 760px) {
+    .wordmark,
+    .pr-lbl,
+    .arrow,
+    .ag {
+      display: none;
+    }
+    .nav-btn {
+      padding-left: 7px;
+      padding-right: 7px;
+    }
+    .titlebar {
+      gap: 6px;
+    }
   }
   .ws-chip .sep {
     color: var(--text-ghost);

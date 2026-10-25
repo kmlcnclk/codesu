@@ -102,7 +102,8 @@ fn from_package_json(out: &mut Vec<Script>, root: &Path, dir: &Path) {
             out,
             "npm",
             scoped(&prefix, name),
-            format!("{pm} run {name}"),
+            // The key is whatever the file says; it is typed into a shell, so quote it.
+            format!("{pm} run {}", shell_quote(name)),
             dir,
             rel(root, &file),
         );
@@ -141,7 +142,8 @@ fn from_makefile(out: &mut Vec<Script>, root: &Path, dir: &Path) {
                 out,
                 "make",
                 scoped(&prefix, target),
-                format!("make {target}"),
+                // `--` keeps a target such as `-foo` from being read as an option.
+                format!("make -- {target}"),
                 dir,
                 rel(root, &file),
             );
