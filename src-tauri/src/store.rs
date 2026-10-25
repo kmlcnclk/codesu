@@ -285,6 +285,44 @@ fn is_safe_session_id(session_id: &str) -> bool {
 /// Whether Claude Code has a persisted conversation for `session_id`.
 /// Sessions live at `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`.
 /// Used to choose `--resume` (exists) vs `--session-id` (create) with no error flash.
+/// The user/assistant lines of a persisted session, oldest first, for the Chat view to
+/// replay when it resumes a session that was started earlier (in either view).
+///
+/// `~/.claude/projects/<project>/<id>.jsonl` holds one JSON object per line; only the
+/// conversation itself is returned (hooks, summaries and other bookkeeping are skipped),
+/// capped so a long session cannot flood the webview.
+pub fn claude_session_transcript(session_id: &str) -> Result<Vec<String>, String> {
+    if !is_safe_session_id(session_id) {
+        return Err("bad session id".into());
+    }
+    let home = std::env::var("HOME").map_err(|_| "no HOME")?;
+    let projects = PathBuf::from(home).join(".claude").join("projects");
+    let file = format!("{session_id}.jsonl");
+    let entries = fs::read_dir(&projects).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path().join(&file);
+        if !path.is_file() {
+            continue;
+        }
+        let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let mut out: Vec<String> = text
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                t.starts_with("{\"parentUuid\"") || t.contains("\"type\":\"user\"") || t.contains("\"type\":\"assistant\"")
+            })
+            .filter(|l| !l.contains("\"isMeta\":true"))
+            .map(str::to_string)
+            .collect();
+        const MAX_LINES: usize = 4000;
+        if out.len() > MAX_LINES {
+            out = out.split_off(out.len() - MAX_LINES);
+        }
+        return Ok(out);
+    }
+    Ok(Vec::new())
+}
+
 pub fn claude_session_exists(session_id: &str) -> bool {
     if !is_safe_session_id(session_id) {
         return false;

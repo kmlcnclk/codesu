@@ -232,6 +232,12 @@ fn parse_status(root: &str, out: &str) -> RepoStatus {
         if let Some(head) = rec.strip_prefix("## ") {
             let name = head.split(" [").next().unwrap_or(head);
             let name = name.split("...").next().unwrap_or(name);
+            // A fresh repo says `## No commits yet on main` (older gits: `Initial commit
+            // on main`); the branch is still `main`.
+            let name = name
+                .strip_prefix("No commits yet on ")
+                .or_else(|| name.strip_prefix("Initial commit on "))
+                .unwrap_or(name);
             if !name.starts_with("HEAD (no branch)") {
                 status.branch = Some(name.trim().to_string());
             }
@@ -296,13 +302,15 @@ pub fn status(repo: &str) -> Result<RepoStatus, String> {
 pub fn diff_file(repo: &str, path: &str, staged: bool, untracked: bool) -> Result<String, String> {
     ensure_repo(repo)?;
     if untracked {
+        // Run from the worktree root with the RELATIVE path: `--no-index` prints the
+        // path exactly as given, and an absolute one would become `b/Users/…/new.txt`,
+        // a key the UI could never match against the status list.
         let root = worktree_root(repo)?;
-        let abs = Path::new(&root).join(path);
         let out = Command::new("git")
             .arg("-C")
-            .arg(repo)
+            .arg(&root)
             .args(["diff", "--no-index", "--no-color", "--", "/dev/null"])
-            .arg(&abs)
+            .arg(path)
             .output()
             .map_err(|e| format!("failed to run git: {e}"))?;
         // `--no-index` exits 1 for "files differ", which is exactly what we asked for.
@@ -336,4 +344,26 @@ pub fn stage_file(repo: &str, path: &str, staged: bool) -> Result<(), String> {
         git(repo, &["restore", "--staged", "--", path])?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_of_a_repo_with_no_commits_yet() {
+        let st = parse_status("/r", "## No commits yet on main\0?? a.txt\0");
+        assert_eq!(st.branch.as_deref(), Some("main"));
+        let st = parse_status("/r", "## Initial commit on dev\0");
+        assert_eq!(st.branch.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn tracking_branch_and_counts_still_parse() {
+        let st = parse_status("/r", "## main...origin/main [ahead 1, behind 2]\0");
+        assert_eq!(st.branch.as_deref(), Some("main"));
+        assert_eq!((st.ahead, st.behind), (1, 2));
+        let st = parse_status("/r", "## HEAD (no branch)\0");
+        assert_eq!(st.branch, None);
+    }
 }

@@ -67,8 +67,12 @@
     }
   }
 
+  /** Bumped per request so a slow diff that lands late cannot replace a newer one. */
+  let diffReq = 0;
+
   async function showDiff(change: FileChange) {
     if (!root) return;
+    const req = ++diffReq;
     selectedChange = change;
     wholeDiff = false;
     diffLoading = true;
@@ -80,32 +84,42 @@
       if (!text.trim() && change.staged) {
         text = await gitDiffFile(root, change.path, true, false);
       }
+      if (req !== diffReq) return;
       diffText = text;
     } catch (e) {
+      if (req !== diffReq) return;
       diffError = String(e);
       diffText = "";
     } finally {
-      diffLoading = false;
+      if (req === diffReq) diffLoading = false;
     }
   }
 
   async function showAllDiff() {
     if (!root) return;
+    const req = ++diffReq;
     wholeDiff = true;
     selectedChange = null;
     diffLoading = true;
     diffError = null;
     try {
-      const [unstaged, staged] = await Promise.all([
+      // `git diff` knows nothing about untracked files, so each one is diffed against
+      // /dev/null on its own and appended — otherwise "all changes" would silently skip
+      // exactly the files an agent just created.
+      const untracked = (status?.changes ?? []).filter((c) => c.untracked);
+      const [unstaged, staged, ...fresh] = await Promise.all([
         gitDiffAll(root, false),
         gitDiffAll(root, true),
+        ...untracked.map((c) => gitDiffFile(root, c.path, false, true)),
       ]);
-      diffText = [staged, unstaged].filter((s) => s.trim()).join("\n");
+      if (req !== diffReq) return;
+      diffText = [staged, unstaged, ...fresh].filter((s) => s.trim()).join("\n");
     } catch (e) {
+      if (req !== diffReq) return;
       diffError = String(e);
       diffText = "";
     } finally {
-      diffLoading = false;
+      if (req === diffReq) diffLoading = false;
     }
   }
 

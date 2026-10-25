@@ -1,3 +1,4 @@
+mod chat;
 mod claude_home;
 mod editor;
 mod fsx;
@@ -5,7 +6,9 @@ mod git;
 mod github;
 mod pty;
 mod runner;
+mod runners;
 mod search;
+mod slack;
 mod store;
 mod testing;
 
@@ -15,6 +18,7 @@ use runner::Script;
 use search::Hit;
 use testing::TestTarget;
 use pty::PtyManager;
+use chat::ChatManager;
 use serde_json::Value;
 use std::collections::HashMap;
 use tauri::ipc::{Channel, Response};
@@ -65,6 +69,54 @@ fn kill_pty(manager: State<PtyManager>, id: String) {
     manager.kill(&id);
 }
 
+// ---------- Chat (headless Claude) commands ----------
+
+/// Start a headless `claude` for the Chat view; its JSON lines arrive as `chat-line` events.
+#[tauri::command(async)]
+fn chat_start(
+    app: AppHandle,
+    chats: State<ChatManager>,
+    id: String,
+    cwd: String,
+    args: Vec<String>,
+    env: Option<HashMap<String, String>>,
+) -> Result<(), String> {
+    chats.start(app, id, cwd, args, env)
+}
+
+/// Write one JSON line to the session's stdin. Sync, so lines stay in order.
+#[tauri::command]
+fn chat_send(chats: State<ChatManager>, id: String, line: String) -> Result<(), String> {
+    chats.send(&id, &line)
+}
+
+#[tauri::command]
+fn chat_stop(chats: State<ChatManager>, id: String) {
+    chats.stop(&id);
+}
+
+// ---------- Run rail: runners + environment profiles ----------
+
+#[tauri::command(async)]
+fn discover_runners(root: String) -> Result<Vec<runners::Runner>, String> {
+    runners::discover(&root)
+}
+
+#[tauri::command]
+fn runner_command(runner: runners::Runner, entry: String) -> String {
+    runners::command(&runner, &entry)
+}
+
+#[tauri::command(async)]
+fn env_profile_load(app: AppHandle, project: String) -> Result<Value, String> {
+    runners::profile_json(&app, &project)
+}
+
+#[tauri::command(async)]
+fn env_profile_save(app: AppHandle, project: String, profile: runners::EnvProfile) -> Result<(), String> {
+    runners::save_profile(&app, &project, &profile)
+}
+
 // ---------- Git worktree commands ----------
 
 #[tauri::command(async)]
@@ -93,6 +145,31 @@ fn list_pull_requests(
 #[tauri::command(async)]
 fn github_repo_url(repo: String) -> Result<String, String> {
     github::repo_url(&repo)
+}
+
+// ---------- Slack commands ----------
+
+/// Validate a Slack user token and keep it in the Keychain.
+#[tauri::command(async)]
+fn slack_connect(token: String) -> Result<slack::Account, String> {
+    slack::connect(&token)
+}
+
+/// The connected Slack account, or `None` when no token is stored.
+#[tauri::command(async)]
+fn slack_account() -> Result<Option<slack::Account>, String> {
+    slack::account()
+}
+
+#[tauri::command(async)]
+fn slack_disconnect() {
+    slack::disconnect()
+}
+
+/// Messages the user has reacted to with `emoji` — the UI turns new ones into notes.
+#[tauri::command(async)]
+fn slack_poll(emoji: String) -> Result<Vec<slack::SlackMessage>, String> {
+    slack::poll(&emoji)
 }
 
 #[tauri::command(async)]
@@ -243,6 +320,12 @@ fn save_state(app: AppHandle, state: Value) -> Result<(), String> {
 #[tauri::command]
 fn claude_session_exists(session_id: String) -> bool {
     store::claude_session_exists(&session_id)
+}
+
+/// The conversation lines of a persisted session, for the Chat view to replay.
+#[tauri::command(async)]
+fn claude_session_transcript(session_id: String) -> Result<Vec<String>, String> {
+    store::claude_session_transcript(&session_id)
 }
 
 // ---------- Per-agent Claude home commands ----------
@@ -408,7 +491,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(PtyManager::default())
+        .manage(ChatManager::default())
         .invoke_handler(tauri::generate_handler![
+            chat_start,
+            chat_send,
+            chat_stop,
+            discover_runners,
+            runner_command,
+            env_profile_load,
+            env_profile_save,
             start_pty,
             write_pty,
             resize_pty,
@@ -417,12 +508,17 @@ pub fn run() {
             list_worktrees,
             list_pull_requests,
             github_repo_url,
+            slack_connect,
+            slack_account,
+            slack_disconnect,
+            slack_poll,
             remove_worktree,
             is_git_repo,
             dir_exists,
             load_state,
             save_state,
             claude_session_exists,
+            claude_session_transcript,
             claude_agent_env,
             prune_claude_homes,
             open_in_editor,
@@ -450,6 +546,8 @@ pub fn run() {
             if let RunEvent::ExitRequested { .. } = event {
                 let manager: State<PtyManager> = app_handle.state();
                 manager.kill_all();
+                let chats: State<ChatManager> = app_handle.state();
+                chats.stop_all();
             }
         });
 }

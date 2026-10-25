@@ -24,6 +24,8 @@
   } from "$lib/terminal/attachments.svelte";
   import type { Rect } from "$lib/terminal/layout";
   import Icon from "./Icon.svelte";
+  import ChatPane from "./chat/ChatPane.svelte";
+  import { chatFor } from "$lib/chat/session.svelte";
 
   let {
     agent,
@@ -73,6 +75,21 @@
   // stays dormant — preventing many Claude processes from spawning at once — until
   // clicked. (Splitting or switching into a workspace launches the relevant panes.)
   let launched = $derived(app.isLaunched(agent.id));
+  /**
+   * The view this pane uses. The Settings default applies when the pane STARTS; while a
+   * process is running the view is pinned, so flipping the setting cannot tear down a
+   * terminal mid-turn. The pane's own override ("Open in chat / terminal") always wins.
+   */
+  let pinnedView = $state<"chat" | "terminal" | null>(null);
+  let chatMode = $derived((agent.kind === "claude" ? (agent.view ?? pinnedView ?? app.claudeView) : "terminal") === "chat");
+  $effect(() => {
+    // Pin while something runs (a PTY, or a headless chat session); release otherwise.
+    // `chatFor` (not a lookup that may return nothing) so the session's status is
+    // tracked from the first run, even for a tab whose chat has not opened yet.
+    const chatRunning = agent.kind === "claude" ? chatFor(agent.id).running : false;
+    if (started || chatRunning) pinnedView = chatMode ? "chat" : "terminal";
+    else pinnedView = null;
+  });
 
   /**
    * Choose the exact Claude command by checking whether the session file really
@@ -91,9 +108,12 @@
       // Seed the task prompt only when creating a brand-new session (first launch).
       seeded = !exists && !agent.sessionStarted && !!agent.initialPrompt;
       const seed = seeded ? " " + shellQuote(agent.initialPrompt!) : "";
+      // Same permission bar on both halves of the `||` (see app.effectiveRun): whichever
+      // one wins, the agent must not fall back to prompting for everything.
+      const perm = app.permissionFlag;
       return exists
-        ? `claude --resume ${id} || claude --session-id ${id}`
-        : `claude --session-id ${id}${seed} || claude --resume ${id}`;
+        ? `claude --resume ${id}${perm} || claude --session-id ${id}${perm}`
+        : `claude --session-id ${id}${perm}${seed} || claude --resume ${id}${perm}`;
     }
     return app.effectiveRun(agent);
   }
@@ -194,6 +214,17 @@
     // Reference rect so a resize re-runs this effect and refits the terminal.
     void rect;
     void visible;
+    if (chatMode) {
+      // Switching a running terminal to chat: the PTY goes, the session continues
+      // headless (same session id, resumed by ChatPane).
+      if (started) {
+        teardown();
+        started = false;
+        seeded = false;
+      }
+      error = null;
+      return;
+    }
     if (visible && launched) {
       // `error` latches the auto-start off: a spawn that failed is retried only when
       // the user asks (Retry), never on every re-render of the pane.
@@ -226,6 +257,8 @@
     if (focused && visible && started) requestAnimationFrame(() => handle?.focus());
   });
 
+  // The pane unmounts on every tab switch; a removed agent's chat session is ended by
+  // the store's onAgentGone hook, not here.
   onDestroy(teardown);
 
   // ---------- attachments ----------
@@ -514,7 +547,18 @@
   {/if}
 
   <div class="term-wrap">
-    <div class="term" bind:this={container}></div>
+    {#if chatMode && visible}
+      <!-- Only the pane on screen renders the chat; the session itself lives in the
+           store, so a hidden agent keeps running without a component. -->
+      <ChatPane {agent} {visible} {cwd} />
+    {/if}
+    <div class="term" class:hidden={chatMode} bind:this={container}></div>
+    {#if !chatMode && agent.kind === "claude" && visible}
+      <!-- The way back to the chat view; the pane's own choice is remembered. -->
+      <button class="view-switch" title="Show this session as a chat" onclick={(e) => { e.stopPropagation(); chatFor(agent.id).wanted = true; app.setAgentView(agent.id, "chat"); }}>
+        <Icon name="notes" size={12} /> Open in chat
+      </button>
+    {/if}
 
     <!--
       Attachments. A collapsed handle on the RIGHT edge, and a popover above it —
@@ -650,7 +694,15 @@
       </button>
     {/if}
 
-    {#if visible && error}
+    {#if chatMode}
+      {#if visible && !launched}
+        <button class="resume" onclick={(e) => { e.stopPropagation(); app.launchAgent(agent.id); }}>
+          <span class="rdot"></span>
+          <span class="label">Resume Claude session</span>
+          <span class="hint">Click to start · dormant to save resources</span>
+        </button>
+      {/if}
+    {:else if visible && error}
       <!-- The process could not start. Say why, and name the folder — a moved workspace
            or a deleted worktree is by far the most common cause, and it is invisible
            otherwise. -->
@@ -694,6 +746,37 @@
   }
   .pane.visible {
     display: block;
+  }
+  .term.hidden {
+    display: none;
+  }
+  .view-switch {
+    position: absolute;
+    right: 44px;
+    bottom: 8px;
+    z-index: 5;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 26px;
+    padding: 0 9px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--surface-2);
+    color: var(--text-faint);
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    opacity: 0.45;
+    transition: opacity 0.14s, color 0.14s;
+  }
+  .pane:hover .view-switch {
+    opacity: 1;
+  }
+  .view-switch:hover {
+    color: var(--text);
+    border-color: var(--border-strong);
   }
   /* ---------- attachments ---------- */
 

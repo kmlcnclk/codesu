@@ -21,6 +21,43 @@ A detailed breakdown of what Codesu can do for you.
 
 ---
 
+## Chat View (Claude sessions)
+
+Every Claude agent's pane can be a **chat** instead of a terminal (Settings → Claude
+session view; a pane can switch either way from its strip). Claude Code keeps running in
+the background as the same session, so "Open in terminal" and `claude --resume` always
+work.
+
+- **Transcript**: your messages, Claude's replies (Markdown, code, tables), and every
+  tool call as a row that opens to show its output. Three layouts: Transcript (rows
+  inline), Split (an activity rail with the files changed this session), Simple (one
+  line per step).
+- **When Claude needs you**: a card for each tool permission (Allow once / Allow for
+  session / Deny, `Y` `A` `N`), multiple-choice question (number keys, "Other…"), and
+  plan approval; an amber bar above the composer while something is open; the agent's
+  roster state goes blocked, with the chime.
+- **Subagents**: a card per agent Claude spawns (name, prompt, live step, tokens, tool
+  count, result). *Enter* opens the agent's own transcript with a composer whose
+  messages are handed to that agent through the session; the strip counts running
+  agents and lists them.
+- **Follow-ups**: while a turn runs, Enter queues a message (edit / delete / Send now in
+  the Queued panel) or steers immediately, per Settings; `⌘⏎` does the other.
+- **Attachments**: drop, paste or pick files; chips with a hover preview, kept on the
+  sent message.
+- **Prompt navigator**: a tick per message you sent on the transcript's edge, with a
+  list to jump back; a "jump to latest" button when scrolled up.
+- **Context & usage**: the strip's meter opens a popover with the context window used
+  and your Claude usage (session and weekly, with reset times).
+- **Run rail**: the repo's scripts and the `*Runner.kt` classes this session wrote or
+  changed. A launch dialog picks dev or prod, dry run, the injected variables (kept in
+  Codesu's data folder, never in the repo) and shows the exact command; every run opens
+  in an output tab and, when it ends, its exit code and output tail go to the session
+  (automatically while the session runs and the setting is Always; otherwise with one
+  click on the run's "Send to session").
+- **Resumed sessions** replay their earlier conversation from Claude's own transcript.
+
+---
+
 ## Terminal Emulation
 
 ### High-Performance Terminal
@@ -52,7 +89,8 @@ read what the agent wrote, fix it by hand, and run it — without opening a sepa
   folding, bracket matching and `Cmd + F` search
 - **Tabs** per open file, remembered per workspace across restarts (paths only — every
   buffer is re-read from disk, so you never look at a stale copy)
-- **Cmd + S to save**, with an unsaved-changes dot on the tab
+- **Cmd + S to save** while the editor has focus (elsewhere it opens Settings), with an
+  unsaved-changes dot on the tab
 - **Agent-aware**: a file an agent rewrote in the background is re-read when you focus
   its tab, and a save is refused (offering *Reload* or *Overwrite*) if the file moved on
   underneath an edit of yours
@@ -69,61 +107,59 @@ read what the agent wrote, fix it by hand, and run it — without opening a sepa
 - **Jump to edit**: open the file being reviewed in the editor in one click
 
 ### Run
-- **Script discovery** — `package.json` scripts (run with the package manager the
-  lockfile implies), `Makefile` targets, Cargo, Gradle, Go, Python and the repo's shell
-  scripts, including sub-projects up to two levels deep
-- **Run panel** — a real shell per workspace, so scripts run with your environment,
+- **Run panel** — a real shell per workspace, so commands run with your environment,
   accept input, and keep their scrollback; **Stop** sends `Ctrl-C`
-- **Ad-hoc commands**: type anything into the run bar
+- **Ad-hoc commands**: type anything into the run bar; **Run again** repeats the last one
+- **Run this test**: the gutter arrow next to a test (JVM, Cargo, Go, pytest, vitest/jest)
+  types the right command for that one test into the panel
 - The panel is collapsible and resizable, and keeps running while you are in another view
 
 ---
 
 ## Task & Project Management
 
-### Kanban Board
-- **Four-Column Board**:
-  - **Backlog**: New tasks not started
-  - **In Progress**: Currently being worked on
-  - **Testing**: Tasks in QA/review
-  - **Done**: Completed tasks (auto-archive)
-- *(Ideas are captured separately on the **Notes** page and can be forked into tasks.)*
-- **Drag & Drop**: Move tasks between columns
-- **Task Details**: Attach files, add descriptions, link agents
-- **Spawn an agent from a task**: the task's title, details, and file paths become
-  the agent's opening prompt
+### Agent Board (Tasks page, **Cmd + Y**)
+Every live agent is a card on a four-column board, so one screen answers "what is
+everyone doing?" across all projects:
+- **Backlog**: agents that have not started working yet
+- **In Progress**: agents at work (or waiting for you)
+- **Testing**: agents whose work is being checked
+- **Done**: finished agents — they leave the tab strip and can be restored from History
+- **Drag & Drop**: move a card between columns to change the agent's lane; an agent
+  created from a note moves its note's task along with it
+- **Click a card** to jump to that agent's terminal
+- Cards show the agent's project / workspace, the note it was spawned from, and when it
+  was last used
 
-### Agent-Task Linking
-- **Dedicated Agents**: Assign agents to specific tasks
-- **Multi-Agent Tasks**: Coordinate multiple agents on complex tasks
-- **Task History**: See which agents worked on which tasks
-- **Task Comments**: Attach notes and Claude responses to tasks
-
-### File Management
-- **Attachments**: Add files to tasks (code, docs, images)
-- **Image Preview**: View images directly in the app
-- **File Linking**: Reference files across multiple tasks
-- **Workspace Files**: Organize by project
+### Notes → agents
+- **Spawn an agent from a note**: *Create agent* on a note opens a fresh worktree
+  workspace and starts a Claude agent with the note (or just the highlighted text) as
+  its opening prompt
+- **Linked agents**: a note lists every agent it spawned, and the agent's card shows
+  the note — jump either way in one click
+- **Attachments**: drop files or paste images onto an agent's pane; they are shared
+  with the agent and can be previewed in the app
 
 ---
 
 ## Activity & History
 
 ### Daily Activity Report
-- **Automatic Tracking**: Every action is logged
-- **Daily Summaries**: See what you accomplished each day
-- **Timeline View**: Hourly breakdown of work activity
-- **Task Metrics**: Track productivity by task type
+- **Automatic Tracking**: every Claude turn and every finished agent is journaled
+- **Daily Summaries**: completed / worked-on / workspaces touched, for any day
+- **Entries link back**: click a row to open that agent
+- **Copy for standup**: the day's report as text, ready to paste
 
 ### Session History
-- **History page**: Review finished agents and restore them
-- **Task archive**: Browse completed/archived tasks
+- **History page**: finished agents, archived projects and archived workspaces, each
+  with a *Restore*
 - **Day-by-day journal**: When you worked on or completed each agent and task
 - **120-Day Retention**: The activity journal is pruned to a rolling 120-day window
 
 ### Search & Filter
-- **Task Search**: Quickly locate tasks by name or description
-- **Archive browsing**: Completed tasks stay searchable in History
+- **Notes search**: full-text search across notes (and the archive tab)
+- **Sidebar filter**: type-to-filter projects and workspaces in the rail
+- **Code search**: files, symbols and text in the active workspace (**Cmd + P** in Code)
 
 ---
 
@@ -140,6 +176,11 @@ read what the agent wrote, fix it by hand, and run it — without opening a sepa
 - **Fork to Task**: Convert ideas into actionable tasks
 - **Batch Processing**: Create multiple tasks from related ideas
 - **Idea History**: View all past ideas and their status
+
+### Slack → Notes
+- **React to Save**: React to any Slack message with 📥 (`:inbox_tray:`, configurable — Slack's "Save for later" has no API) and it becomes a note within a minute
+- **Context Kept**: Each note records who said it, where, and links back to the message ("Open in Slack")
+- **Setup**: Settings → Slack — create an app from the provided manifest and paste its user token (stored in the macOS Keychain)
 
 ---
 
@@ -163,8 +204,8 @@ Defaults (macOS). Every shortcut is rebindable in **Settings → Shortcuts**.
 - **Cmd + Delete**: Close current agent
 - **Cmd + Shift + Z**: Reopen last closed agent
 
-### Within Tasks / Notes / History
-- **Cmd + 1 / 2 / 3**: Switch between that page's sub-views (board / list / archive)
+### Within Notes
+- **Cmd + 1 / 2**: Switch between the notes list and the archive
 
 *Keys typed inside a terminal pane (e.g. `Ctrl+C`, `Ctrl+L`) are handled by the
 shell or CLI running there, not by Codesu.*
@@ -174,9 +215,10 @@ shell or CLI running there, not by Codesu.*
 ## Git Integration
 
 ### Worktree Support
-- **Create worktrees on the fly**: `<repo>/.worktrees/<branch>`, so parallel agents
-  work on isolated branches without stepping on each other
-- **List & remove**: Manage a repo's worktrees straight from the app
+- **Create worktrees on the fly**: `~/.codesu/worktrees/<repo>/<branch>`, so parallel
+  agents work on isolated branches without stepping on each other
+- **Archive a workspace** to hide it (the worktree stays on disk for `git worktree`);
+  *Restore* it from History
 - **Branch Isolation**: Each worktree is its own directory on its own branch
 - **Git Commands**: Run any git command through agent terminals as usual
 - **Review in-app**: the Code view's Changes panel shows `git status` and diffs for the
@@ -265,9 +307,10 @@ bundled browser.
 - **Memory**: modest baseline; grows with the number of open terminal sessions
 - **CPU**: minimal when idle; scales with terminal output (coalesced into ~8ms / 64KB batches)
 - **Disk**: small install (~20MB app) plus your `state.json`
-- **Network**: **Codesu itself makes no network calls** — only the `claude` CLI and
-  any git commands you run reach the network. Agent state is read from terminal
-  output, never polled from an API.
+- **Network**: Codesu reaches the network only through tools you already trust — the
+  `claude` CLI, git, the `gh` CLI (pull-request chip) and, once you connect Slack,
+  `curl` polling Slack for your reactions once a minute. Agent state is read from
+  terminal output, never polled from an API.
 
 ---
 

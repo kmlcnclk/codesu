@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { app, TASK_META, type TaskItem, type Workspace } from "$lib/store/app.svelte";
   import Icon from "./Icon.svelte";
   import MarkdownEditor from "./MarkdownEditor.svelte";
   import NewWorkspaceDialog from "./NewWorkspaceDialog.svelte";
   import NewProjectDialog from "./NewProjectDialog.svelte";
   import { stripMarkdown } from "$lib/markdown";
+  import { openUrl } from "@tauri-apps/plugin-opener";
 
   let { onOpenAgent }: { onOpenAgent: (agentId: string) => void } = $props();
 
@@ -18,9 +19,12 @@
     return list[0]?.id ?? null;
   }
   let selectedId = $state<string | null>(initialNoteId());
-  // Remember the open note so it's restored next time the Notes page is entered.
+  // Remember the open note so it's restored next time the Notes page is entered. Only
+  // `selectedId` is tracked: setLastNote also reads lastNoteId, and tracking that made
+  // loading saved state re-run this with the pre-load null, wiping the restored note.
   $effect(() => {
-    app.setLastNote(selectedId);
+    const id = selectedId;
+    untrack(() => app.setLastNote(id));
   });
   let focusId = $state<string | null>(null);
   let query = $state("");
@@ -54,9 +58,15 @@
   );
   const linkedAgents = $derived(selected ? selected.agentIds.map(id => agentMap.get(id)).filter((a): a is typeof a & {} => a !== undefined) : []);
   const base = $derived(listTab === "archived" ? app.ideaArchive : app.ideaList);
-  // If the current selection isn't valid for the visible tab, fall back to its first note.
+  // Whenever nothing valid is selected but the tab has notes, pick one: the last-opened
+  // note if it's here, else the newest. Covers the page mounting before saved state has
+  // loaded (selection started out null) and the list going from empty to non-empty, e.g.
+  // the first note imported from Slack.
   $effect(() => {
-    if (selectedId && !selected) selectedId = base[0]?.id ?? null;
+    if (selected) return;
+    const last = app.lastNoteId;
+    const next = (last && base.some((t) => t.id === last) ? last : base[0]?.id) ?? null;
+    if (next !== selectedId) selectedId = next;
   });
   const filtered = $derived.by(() => {
     if (!query.trim()) return base;
@@ -98,6 +108,8 @@
   }
 
   function newIdea() {
+    // New notes are active; from the Archive tab the note would be created out of sight.
+    app.setPageView("notes", "active");
     const t = app.addTask({ title: "", status: "idea" });
     query = "";
     selectedId = t.id;
@@ -238,6 +250,9 @@
                 onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (selectedId = t.id)}
               >
                 <div class="item-top">
+                  {#if t.source?.kind === "slack"}
+                    <span class="item-src" title="From Slack · {t.source.author} in {t.source.place}"><Icon name="hash" size={12} /></span>
+                  {/if}
                   <span class="item-title">{displayTitle(t)}</span>
                   {#if t.archived}
                     <span class="item-task" title="Archived"><Icon name="archive" size={12} /></span>
@@ -284,6 +299,18 @@
           <span class="meta">Edited {fmtDate(s.updatedAt)}</span>
           {#if wordCount > 0}<span class="meta dim">· {wordCount} word{wordCount === 1 ? "" : "s"}</span>{/if}
           <span class="bar-spacer"></span>
+
+          {#if s.source?.kind === "slack"}
+            {@const src = s.source}
+            <button
+              class="task-chip-btn"
+              style="--c:var(--hue-violet)"
+              onclick={() => void openUrl(src.permalink)}
+              title="Open the message in Slack"
+            >
+              <Icon name="hash" size={12} />{src.author} · {src.place}
+            </button>
+          {/if}
 
           {#if s.archived}
             <span class="task-chip" style="--c:var(--text-muted)" title="Archived note">
@@ -578,6 +605,12 @@
     white-space: nowrap;
     flex: 1;
     min-width: 0;
+  }
+  .item-src {
+    display: grid;
+    place-items: center;
+    color: var(--text-muted);
+    flex-shrink: 0;
   }
   .item-task {
     display: grid;

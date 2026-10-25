@@ -60,7 +60,7 @@ Codesu solves that by:
 
 ### Workspaces & git worktrees
 - Organize agents by project folder, each with an accent color.
-- **Create git worktrees on the fly** (`<repo>/.worktrees/<branch>`) so parallel agents work on isolated branches without stepping on each other — created, listed, and removed straight from the app.
+- **Create git worktrees on the fly** (`~/.codesu/worktrees/<repo>/<branch>`) so parallel agents work on isolated branches without stepping on each other — created straight from the app.
 - **Open a workspace in your editor** (VS Code or IntelliJ IDEA) with one click.
 
 ### Tasks (kanban)

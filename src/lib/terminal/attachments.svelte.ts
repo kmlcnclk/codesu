@@ -15,6 +15,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { app, type TaskAttachment } from "$lib/store/app.svelte";
 import type { TerminalHandle } from "./createTerminal";
+import { chatIfAny } from "$lib/chat/session.svelte";
 
 /** Live terminals, so a drop can reach the pane the pointer was actually over. */
 const panes = new Map<string, TerminalHandle>();
@@ -108,6 +109,17 @@ let lastDragTarget: string | null = null;
  */
 let allowed = $state<string[]>([]);
 
+/**
+ * Agents whose pane is the Chat view. For them a file is only RECORDED (and granted a
+ * thumbnail); nothing is pasted, because there is no terminal — the chat composer reads
+ * the agent's attachment list and sends the paths with the next message.
+ */
+const chatAgents = new Set<string>();
+export function setChatMode(agentId: string, on: boolean) {
+  if (on) chatAgents.add(agentId);
+  else chatAgents.delete(agentId);
+}
+
 export function attachmentsOf(agentId: string): TaskAttachment[] {
   return app.attachmentsOf(agentId);
 }
@@ -165,6 +177,14 @@ export function attach(agentId: string, paths: string[]): string[] {
   const clean = paths.filter(Boolean);
   if (clean.length === 0) return [];
 
+  if (chatAgents.has(agentId)) {
+    const added = app.addAttachments(agentId, clean);
+    for (const item of added) {
+      if (item.isImage) void grantThumbnail(item.path);
+    }
+    return added.map((a) => a.path);
+  }
+
   const handle = panes.get(agentId);
   if (!handle) {
     // Dormant pane: hold the files and say so, rather than accepting the drop and
@@ -190,9 +210,14 @@ export function attach(agentId: string, paths: string[]): string[] {
   if (fresh.length === 0) return [];
 
   // Recorded on the AGENT, so the tray still knows what was sent after a restart.
-  for (const item of app.addAttachments(agentId, fresh)) {
+  const added = app.addAttachments(agentId, fresh);
+  for (const item of added) {
     if (item.isImage) void grantThumbnail(item.path);
   }
+  // Pasted into the terminal = already given to Claude; the chat view, if this agent is
+  // switched to it later, must not offer the same files as pending chips.
+  const chat = chatIfAny(agentId);
+  if (chat) chat.sentAttachmentIds = [...chat.sentAttachmentIds, ...added.map((a) => a.id)];
   handle.paste(fresh.map(quotePath).join(" ") + " ");
   return fresh;
 }

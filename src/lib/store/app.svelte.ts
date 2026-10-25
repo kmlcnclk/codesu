@@ -56,6 +56,16 @@ export interface Shortcut {
  */
 export type AgentState = "working" | "blocked" | "done" | "idle" | "exited";
 
+/** How a Claude agent's pane is shown: Codesu's chat view, or the CLI's own terminal UI. */
+export type ClaudeView = "chat" | "terminal";
+export type ChatLayout = "transcript" | "split" | "simple";
+export type ChatFollowUp = "queue" | "steer";
+export type ChatToolOutput = "collapsed" | "expanded";
+/** Who answers tool permissions in chat: a card you click, or an automatic allow. */
+export type ChatPermissions = "ask" | "auto";
+export type ChatSendKey = "enter" | "cmd-enter";
+export type ChatRunResults = "always" | "ask" | "never";
+
 /**
  * Priority ordering of agent states for the sidebar roster (see {@link AppStore.rosterOf}):
  * blocked → done → working → idle → exited. Within a group, most-recently-changed on
@@ -158,7 +168,33 @@ export interface TaskItem {
   workspaceId: string | null;
   agentIds: string[]; // every agent spawned-to-work or attached-as-context, oldest→newest
   parentId: string | null; // if set, this task was forked from an idea/task with this id
+  /** Where a note came from when it wasn't typed here — e.g. a Slack message. */
+  source?: NoteSource | null;
 }
+
+/** A note imported from Slack: the message it was made from, for "Open in Slack". */
+export interface NoteSource {
+  kind: "slack";
+  /** `<channel>:<ts>` — the message's identity in Slack. */
+  key: string;
+  permalink: string;
+  author: string;
+  /** `#channel`, `DM with …` or `Group DM`. */
+  place: string;
+}
+
+/** A reacted-to Slack message as `slack_poll` returns it (see src-tauri/src/slack.rs). */
+export interface SlackMessage {
+  key: string;
+  author: string;
+  place: string;
+  text: string;
+  permalink: string;
+  posted_at: number;
+}
+
+/** How many imported Slack message keys are remembered (newest kept). */
+const SLACK_SEEN_LIMIT = 2000;
 
 /**
  * One entry in the day-by-day activity journal — "I worked with / finished this
@@ -263,6 +299,11 @@ export interface Agent {
   /** Archived alongside its workspace — hidden from the active UI, restored on unarchive. */
   archived: boolean;
   /**
+   * This pane's own view, when it differs from the Settings default (`null` = follow
+   * the setting). Set by "Open in terminal" / "Open in chat" on the pane.
+   */
+  view?: ClaudeView | null;
+  /**
    * Files attached to this agent, newest last — what the pane's attachment tray shows.
    *
    * Persisted with the agent rather than held for the session: the tray is the only
@@ -315,6 +356,8 @@ export interface Project {
   color: string;
   order: number;
   archived: boolean;
+  /** When it was archived (epoch ms); absent on rows archived before this was recorded. */
+  archivedAt?: number | null;
   /**
    * Whether `path` is a git repo — decided once, when the project is added, and
    * refreshed by {@link AppState.refreshProjectGit}. Workspaces can only be created
@@ -342,6 +385,8 @@ export interface Workspace {
   color: string;
   order: number;
   archived: boolean;
+  /** When it was archived (epoch ms); absent on rows archived before this was recorded. */
+  archivedAt?: number | null;
   /** For git worktrees: the parent repo + branch (enables removal). */
   repo: string | null;
   branch: string | null;
@@ -539,6 +584,23 @@ class AppState {
    * {@link ClaudePermissionMode}.
    */
   claudePermissionMode = $state<ClaudePermissionMode>("edits");
+  /** Default view for Claude agents (Settings → Claude session view). */
+  claudeView = $state<ClaudeView>("chat");
+  chatLayout = $state<ChatLayout>("transcript");
+  chatFollowUp = $state<ChatFollowUp>("queue");
+  chatToolOutput = $state<ChatToolOutput>("collapsed");
+  chatPermissions = $state<ChatPermissions>("ask");
+  chatSendKey = $state<ChatSendKey>("enter");
+  chatSounds = $state(true);
+  chatRunResults = $state<ChatRunResults>("always");
+  /**
+   * Set by the chat module: called with an agent id when that agent leaves the live UI
+   * (removed, or its workspace archived), so a headless session is not left running
+   * for a pane that no longer exists. The store cannot import the chat module itself.
+   */
+  onAgentGone: ((id: string) => void) | null = null;
+  /** Same, for an agent the idle reaper puts to sleep: its headless session must stop too. */
+  onAgentSleep: ((id: string) => void) | null = null;
   /** System terminal scroll position memory. */
   terminalScrollPos = $state(0);
   /** Keyboard shortcuts configuration. */
@@ -565,6 +627,18 @@ class AppState {
   projCollapsed = $state<Record<string, boolean>>({});
   /** Width (px) of the Notes page's note-list pane — user-resizable, persisted. */
   notesListWidth = $state(296);
+  /**
+   * The reaction (emoji name, no colons) that sends a Slack message to Notes. 📥 by
+   * default: Slack's own "Save for later" has no API, so this reaction stands in for it.
+   * Picked because it reads as "send to my inbox" and is rarely used as a casual reaction.
+   */
+  slackEmoji = $state("inbox_tray");
+  /**
+   * Keys of every Slack message already turned into a note. Remembered separately from
+   * the notes themselves so deleting an imported note doesn't bring it straight back on
+   * the next poll while the reaction is still on the message.
+   */
+  slackSeen = $state<string[]>([]);
 
   // ---------- Code view (built-in editor / review / run) ----------
   /**
@@ -849,8 +923,11 @@ class AppState {
       .filter((p) => !p.archived)
       .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
   }
+  /** Archived projects, most recently archived first (rows from before the stamp: newest created first). */
   get archivedProjects(): Project[] {
-    return this.projects.filter((p) => p.archived);
+    return this.projects
+      .filter((p) => p.archived)
+      .sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0) || b.order - a.order);
   }
   get activeProject(): Project | undefined {
     return this.projects.find((p) => p.id === this.activeProjectId);
@@ -960,8 +1037,11 @@ class AppState {
       .filter((w) => !w.archived)
       .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
   }
+  /** Archived workspaces, most recently archived first (rows from before the stamp: newest created first). */
   get archivedWorkspaces(): Workspace[] {
-    return this.workspaces.filter((w) => w.archived);
+    return this.workspaces
+      .filter((w) => w.archived)
+      .sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0) || b.order - a.order);
   }
   get activeWorkspace(): Workspace | undefined {
     return this.workspaces.find((w) => w.id === this.activeWorkspaceId);
@@ -982,8 +1062,9 @@ class AppState {
     // drifted) workspace path so resume always lands in the right project. A brand-new
     // agent (sessionCwd null) uses its explicit cwd or the workspace path, and binds
     // sessionCwd on first launch (see markSessionStarted).
-    const dir =
-      agent.sessionCwd ?? agent.cwd ?? this.workspaces.find((w) => w.id === agent.workspaceId)?.path;
+    // A blank cwd (an emptied dialog field) counts as unset, so the workspace path wins.
+    const own = [agent.sessionCwd, agent.cwd].find((d) => d && d.trim());
+    const dir = own ?? this.workspaces.find((w) => w.id === agent.workspaceId)?.path;
     return dir && dir.trim() ? dir : null;
   }
 
@@ -1271,10 +1352,27 @@ class AppState {
    * archived alongside their workspace (so an archived workspace's agents are still
    * visible and restorable there).
    */
+  /**
+   * When each agent or task last did something, from the activity journal (a turn
+   * started, a completion) — NOT `lastUsedAt`, which selecting a tab also bumps, so
+   * merely opening a finished agent from History must not move it to the top.
+   */
+  lastActivityAt = $derived.by(() => {
+    const m = new Map<string, number>();
+    for (const e of this.activityLog) if ((m.get(e.refId) ?? 0) < e.at) m.set(e.refId, e.at);
+    return m;
+  });
+
+  /** When an agent was last active — what History sorts and labels by. */
+  historyTime(a: Agent): number {
+    return this.lastActivityAt.get(a.id) ?? a.createdAt ?? 0;
+  }
+
+  /** Finished and archived agents, most recently active first. */
   get historyAgents(): Agent[] {
     return this.agents
       .filter((a) => a.archived || this.effectiveLane(a) === "done")
-      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+      .sort((a, b) => this.historyTime(b) - this.historyTime(a));
   }
   countOf(workspaceId: string): number {
     return this.tabsOf(workspaceId).length;
@@ -1348,6 +1446,7 @@ class AppState {
     const proj = this.projects.find((p) => p.id === id);
     if (!proj) return;
     proj.archived = true;
+    proj.archivedAt = Date.now();
     for (const w of this.workspaces) {
       if (w.projectId === id && !w.archived) this.archiveWorkspace(w.id);
     }
@@ -1467,11 +1566,13 @@ class AppState {
     const ws = this.workspaces.find((w) => w.id === id);
     if (!ws) return;
     ws.archived = true;
+    ws.archivedAt = Date.now();
     // Archive the workspace's agents along with it — they leave the active UI and
     // their PTYs are torn down (via mountedAgents), then restored on unarchive.
     for (const a of this.agents) {
       if (a.workspaceId !== id) continue;
       a.archived = true;
+      this.onAgentGone?.(a.id);
       // Their panes unmount and TerminalPane kills the PTYs, so these agents are no
       // longer "explicitly opened this run". Leaving the ids behind made
       // unarchiveWorkspace remount panes that still counted as launched, and each one
@@ -1756,6 +1857,7 @@ class AppState {
     // Flag the imminent PTY exit as intentional (see markExited) BEFORE tearing down.
     this.sleepingAgentIds.add(id);
     this.launchedAgentIds.delete(id); // TerminalPane disposes the PTY in response
+    this.onAgentSleep?.(id);
     a.status = "idle";
     this.activity.delete(id); // drop turn tracking
     this.screens.delete(id); // its terminal is going away — no ground truth to read
@@ -1835,6 +1937,7 @@ class AppState {
   removeAgent(id: string) {
     const a = this.agents.find((x) => x.id === id);
     if (!a) return;
+    this.onAgentGone?.(id);
     const ws = a.workspaceId;
     const groupId = a.groupId;
     const wasActive = this.activeAgentByWs[ws] === id;
@@ -2180,11 +2283,14 @@ class AppState {
     details?: string;
     status?: TaskStatus;
     attachments?: TaskAttachment[];
+    source?: NoteSource;
   }): TaskItem {
     const now = Date.now();
     const task: TaskItem = {
       id: uid("task"),
-      title: input.title.trim() || "Untitled task",
+      // A note may be untitled — the Notes page shows its first line instead. Only
+      // board tasks fall back to a placeholder.
+      title: input.title.trim() || (input.status === "idea" ? "" : "Untitled task"),
       details: input.details?.trim() ?? "",
       status: input.status ?? "backlog",
       createdAt: now,
@@ -2195,6 +2301,7 @@ class AppState {
       workspaceId: null,
       agentIds: [],
       parentId: null,
+      source: input.source ?? null,
     };
     this.tasks.push(task);
     this.persist();
@@ -2258,7 +2365,9 @@ class AppState {
     const t = this.tasks.find((x) => x.id === id);
     if (!t) return;
     const was = t.status;
-    if (patch.title !== undefined) t.title = patch.title.trim() || t.title;
+    // Clearing a note's title is allowed (it then shows its first line); a board task
+    // keeps its old title instead of going blank.
+    if (patch.title !== undefined) t.title = patch.title.trim() || (t.status === "idea" ? "" : t.title);
     if (patch.details !== undefined) {
       t.details = patch.details.trim();
       t.updatedAt = Date.now();
@@ -2299,6 +2408,45 @@ class AppState {
   removeTask(id: string) {
     this.tasks = this.tasks.filter((t) => t.id !== id);
     this.persist();
+  }
+
+  setSlackEmoji(name: string) {
+    const clean = name.trim().replace(/^:+|:+$/g, "");
+    if (!clean || clean === this.slackEmoji) return;
+    this.slackEmoji = clean;
+    this.persist();
+  }
+
+  /**
+   * Turn reacted-to Slack messages into notes, skipping any imported before. Returns
+   * how many notes were added. The note body ends with who said it and a link back, so
+   * an agent created from the note gets that context too.
+   */
+  importSlackMessages(msgs: SlackMessage[]): number {
+    // Marked seen while filtering, so a message listed twice in one batch is added once.
+    const seen = new Set(this.slackSeen);
+    const fresh = msgs.filter((m) => !seen.has(m.key) && (seen.add(m.key), true));
+    if (!fresh.length) return 0;
+    // Oldest first, so the newest message ends up on top of the (updatedAt-sorted) list.
+    fresh.sort((a, b) => a.posted_at - b.posted_at);
+    for (const m of fresh) {
+      const line = firstLine(m.text) || `Message from ${m.author}`;
+      const title = line.length > 80 ? `${line.slice(0, 79).trimEnd()}…` : line;
+      const body = line === firstLine(m.text) && line.length <= 80 ? stripFirstLine(m.text) : m.text.trim();
+      const footer = `— ${m.author} in ${m.place}, via Slack: ${m.permalink}`;
+      this.addTask({
+        title,
+        details: body ? `${body}\n\n${footer}` : footer,
+        status: "idea",
+        source: { kind: "slack", key: m.key, permalink: m.permalink, author: m.author, place: m.place },
+      });
+      this.slackSeen.push(m.key);
+    }
+    if (this.slackSeen.length > SLACK_SEEN_LIMIT) {
+      this.slackSeen = this.slackSeen.slice(-SLACK_SEEN_LIMIT);
+    }
+    this.persist();
+    return fresh.length;
   }
 
   /**
@@ -2594,6 +2742,11 @@ class AppState {
    * For Claude: first launch creates a session with a known id; later launches resume it,
    * so reopening the app brings the previous conversation back.
    */
+  /** The CLI flag for the chosen permission mode ("" for Claude's default, ask). */
+  get permissionFlag(): string {
+    return PERMISSION_FLAG[this.claudePermissionMode];
+  }
+
   effectiveRun(agent: Agent): string | null {
     if (agent.kind === "claude") {
       if (agent.sessionId) {
@@ -2654,6 +2807,43 @@ class AppState {
     // Existing panes keep the mode they launched with; the next (re)spawn picks
     // this up via effectiveRun().
   }
+  /** One setter for every chat-view setting; each persists. */
+  setChatSetting<K extends "claudeView" | "chatLayout" | "chatFollowUp" | "chatToolOutput" | "chatPermissions" | "chatSendKey" | "chatSounds" | "chatRunResults">(key: K, value: this[K]) {
+    if (this[key] === value) return;
+    (this as unknown as Record<string, unknown>)[key] = value;
+    this.persist();
+  }
+
+  /** The view a Claude agent's pane uses: its own override, else the setting. */
+  viewOf(agent: Agent): ClaudeView {
+    if (agent.kind !== "claude") return "terminal";
+    return agent.view ?? this.claudeView;
+  }
+
+  setAgentView(id: string, view: ClaudeView | null) {
+    const a = this.agents.find((x) => x.id === id);
+    if (!a) return;
+    a.view = view;
+    this.persist();
+  }
+
+  /**
+   * The Chat view knows the agent's state from the protocol itself (a turn started, a
+   * permission is waiting, a result arrived) and sets it directly instead of reading the
+   * screen. Same roster rules as the terminal's monitor.
+   */
+  setAgentState(id: string, state: AgentState) {
+    const a = this.agents.find((x) => x.id === id);
+    if (!a) return;
+    const now = Date.now();
+    if (state === "working") {
+      a.acknowledged = false;
+      a.lastUsedAt = now;
+      this.recordActivity("agent", a.id, a.name, "worked", a.workspaceId);
+    }
+    this.commitState(a, state, now);
+  }
+
 
   addDefaultProject(path: string) {
     const trimmed = path.trim();
@@ -2915,6 +3105,14 @@ class AppState {
       tabLayouts: this.liveTabLayouts(),
       defaultProjects: this.defaultProjects,
       claudePermissionMode: this.claudePermissionMode,
+      claudeView: this.claudeView,
+      chatLayout: this.chatLayout,
+      chatFollowUp: this.chatFollowUp,
+      chatToolOutput: this.chatToolOutput,
+      chatPermissions: this.chatPermissions,
+      chatSendKey: this.chatSendKey,
+      chatSounds: this.chatSounds,
+      chatRunResults: this.chatRunResults,
       terminalScrollPos: this.terminalScrollPos,
       shortcuts: this.shortcuts,
       pageViews: this.pageViews,
@@ -2924,6 +3122,8 @@ class AppState {
       sidebarWidth: this.sidebarWidth,
       projCollapsed: this.projCollapsed,
       notesListWidth: this.notesListWidth,
+      slackEmoji: this.slackEmoji,
+      slackSeen: this.slackSeen,
       codeOpenByWs: this.codeOpenByWs,
       codeTreeWidth: this.codeTreeWidth,
       reviewRailWidth: this.reviewRailWidth,
@@ -3006,6 +3206,7 @@ class AppState {
             initialPrompt: a.initialPrompt ?? null,
             // Absent on every state file written before attachments were persisted.
             attachments: Array.isArray(a.attachments) ? a.attachments : [],
+            view: a.view === "chat" || a.view === "terminal" ? a.view : null,
             status: "idle" as RunStatus,
             exitCode: null,
             // Restore the roster-ordering state so the agents reappear in the order
@@ -3035,6 +3236,7 @@ class AppState {
               workspaceId: t.workspaceId ?? null,
               agentIds: Array.isArray(t.agentIds) ? t.agentIds : t.agentId ? [t.agentId] : [],
               parentId: t.parentId ?? null,
+              source: t.source?.kind === "slack" ? t.source : null,
             }))
           : [];
 
@@ -3115,6 +3317,16 @@ class AppState {
           data.claudePermissionMode === "full"
             ? data.claudePermissionMode
             : "edits";
+        const pick = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
+          typeof v === "string" && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
+        this.claudeView = pick(data.claudeView, ["chat", "terminal"] as const, "chat");
+        this.chatLayout = pick(data.chatLayout, ["transcript", "split", "simple"] as const, "transcript");
+        this.chatFollowUp = pick(data.chatFollowUp, ["queue", "steer"] as const, "queue");
+        this.chatToolOutput = pick(data.chatToolOutput, ["collapsed", "expanded"] as const, "collapsed");
+        this.chatPermissions = pick(data.chatPermissions, ["ask", "auto"] as const, "ask");
+        this.chatSendKey = pick(data.chatSendKey, ["enter", "cmd-enter"] as const, "enter");
+        this.chatSounds = typeof data.chatSounds === "boolean" ? data.chatSounds : true;
+        this.chatRunResults = pick(data.chatRunResults, ["always", "ask", "never"] as const, "always");
         this.terminalScrollPos = typeof data.terminalScrollPos === "number" ? data.terminalScrollPos : 0;
         // Load shortcuts with merge of defaults to catch new/updated shortcuts
         const defaults = this.getDefaultShortcuts();
@@ -3157,6 +3369,10 @@ class AppState {
           this.projCollapsed = { ...data.projCollapsed };
         if (typeof data.notesListWidth === "number")
           this.notesListWidth = Math.max(200, Math.min(560, data.notesListWidth));
+        if (typeof data.slackEmoji === "string" && data.slackEmoji.trim())
+          this.slackEmoji = data.slackEmoji.trim();
+        if (Array.isArray(data.slackSeen))
+          this.slackSeen = data.slackSeen.filter((k: unknown) => typeof k === "string");
         // Code view: only the open-file PATHS are restored — each buffer is re-read from
         // disk when its tab is shown, so a file rewritten while the app was closed is
         // never presented as the version the user last saw.
